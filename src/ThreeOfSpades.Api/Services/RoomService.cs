@@ -54,6 +54,12 @@ public class RoomService(AppDbContext db)
     {
         var room = await Load(roomId, ct) ?? throw new InvalidOperationException("Room not found.");
         EnsureMember(room, userId);
+        var member = room.Members.First(x => x.UserId == userId);
+        if (!member.Online)
+        {
+            member.Online = true;
+            await db.SaveChangesAsync(ct);
+        }
         return ToDto(room, userId);
     }
 
@@ -64,6 +70,7 @@ public class RoomService(AppDbContext db)
         if (room.ActiveGameId is not null) throw new InvalidOperationException("Game is already active.");
         var m = room.Members.First(x => x.UserId == userId);
         m.Ready = !m.Ready;
+        m.Online = true;
         await db.SaveChangesAsync(ct);
         return ToDto(room, userId);
     }

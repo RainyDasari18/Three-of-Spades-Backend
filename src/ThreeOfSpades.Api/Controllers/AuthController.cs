@@ -130,7 +130,7 @@ public class AuthController(AppDbContext db, JwtTokenService jwt, IConfiguration
 
         var token = jwt.Create(user);
         var front = config["Frontend:Origin"] ?? "http://localhost:5173";
-        return Redirect($"{front}/oauth?token={Uri.EscapeDataString(token)}&needsUserName={(string.IsNullOrWhiteSpace(user.UserName) ? "true" : "false")}");
+        return Redirect($"{front}/?token={Uri.EscapeDataString(token)}&needsUserName={(string.IsNullOrWhiteSpace(user.UserName) ? "true" : "false")}");
     }
 
     private async Task<string> UniqueUserName(string raw, CancellationToken ct)

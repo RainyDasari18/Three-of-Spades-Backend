@@ -20,6 +20,7 @@ public class GameHub(LiveGameService games, RoomService rooms) : Hub
     public async Task JoinRoom(Guid roomId)
     {
         await rooms.Get(UserId, roomId, Context.ConnectionAborted);
+        Context.Items["roomId"] = roomId;
         await Groups.AddToGroupAsync(Context.ConnectionId, $"room:{roomId}");
         await games.Heartbeat(UserId, roomId);
         var live = games.Get(roomId);
@@ -40,6 +41,8 @@ public class GameHub(LiveGameService games, RoomService rooms) : Hub
 
     public override async Task OnDisconnectedAsync(Exception? exception)
     {
+        if (Context.Items.TryGetValue("roomId", out var value) && value is Guid roomId)
+            await games.MarkOffline(UserId, roomId);
         await base.OnDisconnectedAsync(exception);
     }
 }

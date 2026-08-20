@@ -1,4 +1,5 @@
 using System.Text;
+using System.Text.Json;
 using Microsoft.AspNetCore.Authentication.JwtBearer;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.IdentityModel.Tokens;
@@ -18,8 +19,14 @@ builder.Services.AddScoped<JwtTokenService>();
 builder.Services.AddScoped<RoomService>();
 builder.Services.AddSingleton<LiveGameService>();
 builder.Services.AddHostedService<DisconnectWorker>();
-builder.Services.AddControllers();
-builder.Services.AddSignalR();
+builder.Services.AddControllers().AddJsonOptions(o =>
+{
+    o.JsonSerializerOptions.PropertyNamingPolicy = JsonNamingPolicy.CamelCase;
+});
+builder.Services.AddSignalR().AddJsonProtocol(o =>
+{
+    o.PayloadSerializerOptions.PropertyNamingPolicy = JsonNamingPolicy.CamelCase;
+});
 builder.Services.AddEndpointsApiExplorer();
 builder.Services.AddSwaggerGen();
 
