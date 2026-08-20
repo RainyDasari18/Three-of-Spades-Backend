@@ -1,6 +1,6 @@
 # Three of Spades Backend
 
-ASP.NET Core API + SignalR + **PostgreSQL**, with a pure **game engine** library (rules v1.0). JWT login/signup, optional Google/GitHub OAuth, and a display **UserName** used at the table.
+ASP.NET Core API + SignalR + **PostgreSQL**, with a pure **game engine** library (rules v1.0). Email/password JWT auth and a display **UserName** used at the table.
 
 ## Run
 
@@ -22,15 +22,8 @@ dotnet run --project src/ThreeOfSpades.Api
 | Login | `POST /api/auth/login` `{ email, password }` |
 | Current user | `GET /api/auth/me` |
 | Set display name | `PUT /api/auth/username` `{ userName }` |
-| Google OAuth | `GET /api/auth/google` |
-| GitHub OAuth | `GET /api/auth/github` |
 
-OAuth redirects to `http://localhost:5173/oauth?token=...`. Set `Authentication:Google:*` and `Authentication:GitHub:*` in `appsettings.json`. Callback URLs:
-
-- `http://localhost:5203/signin-google`
-- `http://localhost:5203/signin-github`
-
-`userName` is what other players see. Password signup requires it up front; OAuth users get a suggested name they can change.
+`userName` is what other players see. Password signup requires it up front.
 
 ## Rooms & game (matches the UI)
 
@@ -57,5 +50,5 @@ Hands and trick-point totals stay hidden in snapshots until the hand is complete
 ## Layout
 
 - `src/ThreeOfSpades.Engine` — deck, bidding, trump, partners, tricks, scoring (no I/O)  
-- `src/ThreeOfSpades.Api` — JWT, OAuth, rooms, live games, SignalR  
+- `src/ThreeOfSpades.Api` — JWT auth, rooms, live games, SignalR  
 - `tests/ThreeOfSpades.Engine.Tests`

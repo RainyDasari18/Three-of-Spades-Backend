@@ -12,7 +12,7 @@ public record JoinRoomRequest(string Code);
 public record TransferRequest(Guid UserId);
 public record KickRequest(Guid UserId);
 public record BidRequest(int Amount);
-public record SelectRequest(string Trump, List<PartnerConditionDto> Conditions);
+public record SelectRequest(string Trump, List<PartnerConditionDto>? Conditions);
 public record PlayRequest(string CardId);
 public record PartnerConditionDto(int Nth, string Rank, string Suit);
 

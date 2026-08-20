@@ -1,11 +1,13 @@
+using Microsoft.AspNetCore.SignalR;
 using Microsoft.EntityFrameworkCore;
 using ThreeOfSpades.Api.Contracts;
 using ThreeOfSpades.Api.Data;
 using ThreeOfSpades.Api.Domain;
+using ThreeOfSpades.Api.Hubs;
 
 namespace ThreeOfSpades.Api.Services;
 
-public class RoomService(AppDbContext db)
+public class RoomService(AppDbContext db, IHubContext<GameHub> hub)
 {
     private static readonly string[] BotNames = ["Aisha", "Vikram", "Meera", "Arjun", "Priya", "Kabir", "Noor"];
 
@@ -47,6 +49,7 @@ public class RoomService(AppDbContext db)
             await db.SaveChangesAsync(ct);
             await db.Entry(room).Collection(r => r.Members).Query().Include(m => m.User).LoadAsync(ct);
         }
+        await NotifyRoom(room);
         return ToDto(room, userId);
     }
 
@@ -72,6 +75,7 @@ public class RoomService(AppDbContext db)
         m.Ready = !m.Ready;
         m.Online = true;
         await db.SaveChangesAsync(ct);
+        await NotifyRoom(room);
         return ToDto(room, userId);
     }
 
@@ -99,10 +103,13 @@ public class RoomService(AppDbContext db)
                 bot = new User { Email = email, UserName = name, IsBot = true };
                 db.Users.Add(bot);
             }
+            bot.IsBot = true;
             room.Members.Add(new RoomMember { RoomId = room.Id, UserId = bot.Id, User = bot, Ready = true, Online = true });
         }
         await db.SaveChangesAsync(ct);
-        return ToDto((await Load(roomId, ct))!, userId);
+        var loaded = (await Load(roomId, ct))!;
+        await NotifyRoom(loaded);
+        return ToDto(loaded, userId);
     }
 
     public async Task<RoomDto> Kick(Guid ownerId, Guid roomId, Guid targetId, CancellationToken ct)
@@ -159,7 +166,6 @@ public class RoomService(AppDbContext db)
         var room = await Load(roomId, ct) ?? throw new InvalidOperationException("Room not found.");
         EnsureOwner(room, ownerId);
         if (room.Archived) throw new InvalidOperationException("Room is archived.");
-        if (room.ActiveGameId is not null) throw new InvalidOperationException("A game is already active.");
         var n = room.Members.Count;
         if (n is < 5 or > 8) throw new InvalidOperationException("Need 5–8 players to start.");
         if (room.Members.Any(m => !m.Online || !m.Ready))
@@ -172,6 +178,13 @@ public class RoomService(AppDbContext db)
             .Include(r => r.Members).ThenInclude(m => m.User)
             .Include(r => r.Games).ThenInclude(g => g.Players)
             .FirstOrDefaultAsync(r => r.Id == id, ct);
+
+    private async Task NotifyRoom(Room room)
+    {
+        foreach (var m in room.Members)
+            await hub.Clients.Group($"user:{m.UserId}").SendAsync("roomUpdated", ToDto(room, m.UserId));
+        await hub.Clients.Group($"room:{room.Id}").SendAsync("roomUpdated", ToDto(room, room.OwnerId));
+    }
 
     private async Task<Room?> LoadByCode(string code, CancellationToken ct) =>
         await db.Rooms
@@ -198,11 +211,14 @@ public class RoomService(AppDbContext db)
         return $"{raw}{Random.Shared.Next(10, 99)}";
     }
 
+    public static bool IsDummy(User user) =>
+        user.IsBot || user.Email.EndsWith("@spades.local", StringComparison.OrdinalIgnoreCase);
+
     public static RoomDto ToDto(Room room, Guid viewerId)
     {
         var members = room.Members
             .OrderBy(m => m.JoinedAt)
-            .Select(m => new MemberDto(m.UserId, m.User.UserName, m.UserId == room.OwnerId, m.Online, m.Ready, m.User.IsBot))
+            .Select(m => new MemberDto(m.UserId, m.User.UserName, m.UserId == room.OwnerId, m.Online, m.Ready, IsDummy(m.User)))
             .ToList();
 
         var history = room.Games

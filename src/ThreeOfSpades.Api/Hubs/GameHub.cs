@@ -3,6 +3,7 @@ using Microsoft.AspNetCore.SignalR;
 using ThreeOfSpades.Api.Auth;
 using ThreeOfSpades.Api.Contracts;
 using ThreeOfSpades.Api.Services;
+using ThreeOfSpades.Engine;
 
 namespace ThreeOfSpades.Api.Hubs;
 
@@ -24,20 +25,37 @@ public class GameHub(LiveGameService games, RoomService rooms) : Hub
         await Groups.AddToGroupAsync(Context.ConnectionId, $"room:{roomId}");
         await games.Heartbeat(UserId, roomId);
         var live = games.Get(roomId);
-        if (live is not null)
-            await Clients.Caller.SendAsync("gameUpdated", LiveGameService.Snapshot(live.State, UserId));
+        if (live is not null && live.State.Phase is not GamePhase.Complete and not GamePhase.Cancelled)
+        {
+            GameSnapshotDto snap;
+            lock (live.Gate)
+                snap = LiveGameService.Snapshot(live.State, UserId);
+            await Clients.Caller.SendAsync("gameUpdated", snap);
+        }
     }
 
-    public Task PlaceBid(Guid roomId, int amount) => games.Bid(UserId, roomId, amount);
+    public Task PlaceBid(Guid roomId, int amount) => Safe(() => games.Bid(UserId, roomId, amount));
 
-    public Task PassBid(Guid roomId) => games.Pass(UserId, roomId);
+    public Task PassBid(Guid roomId) => Safe(() => games.Pass(UserId, roomId));
 
     public Task Select(Guid roomId, string trump, List<PartnerConditionDto> conditions) =>
-        games.Select(UserId, roomId, trump, conditions.Select(c => c.ToModel()).ToList());
+        Safe(() => games.Select(UserId, roomId, trump, (conditions ?? []).Select(c => c.ToModel()).ToList()));
 
-    public Task PlayCard(Guid roomId, string cardId) => games.Play(UserId, roomId, cardId);
+    public Task PlayCard(Guid roomId, string cardId) => Safe(() => games.Play(UserId, roomId, cardId));
 
     public Task Heartbeat(Guid roomId) => games.Heartbeat(UserId, roomId);
+
+    private static async Task Safe(Func<Task> action)
+    {
+        try
+        {
+            await action();
+        }
+        catch (InvalidOperationException ex)
+        {
+            throw new HubException(ex.Message);
+        }
+    }
 
     public override async Task OnDisconnectedAsync(Exception? exception)
     {

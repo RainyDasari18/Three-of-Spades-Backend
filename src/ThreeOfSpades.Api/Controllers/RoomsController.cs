@@ -76,7 +76,7 @@ public class RoomsController(RoomService rooms, LiveGameService games) : Control
 
     [HttpPost("{id:guid}/game/select")]
     public async Task<ActionResult<GameSnapshotDto>> Select(Guid id, SelectRequest req) =>
-        Ok(await games.Select(Me, id, req.Trump, req.Conditions.Select(c => c.ToModel()).ToList()));
+        Ok(await games.Select(Me, id, req.Trump, (req.Conditions ?? []).Select(c => c.ToModel()).ToList()));
 
     [HttpPost("{id:guid}/game/play")]
     public async Task<ActionResult<GameSnapshotDto>> Play(Guid id, PlayRequest req) =>

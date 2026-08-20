@@ -90,14 +90,11 @@ public static class GameEngine
         if (!Suits.All.Contains(trump)) return EngineResult.Fail(g, "Invalid trump.");
 
         var need = CardRules.PartnerConditionCount(g.PlayerCount);
-        if (conditions.Count != need)
+        var unique = DedupPartnerConditions(g, conditions, need);
+        if (unique.Count != need)
             return EngineResult.Fail(g, $"Select {need} partner condition(s).");
 
-        var keys = conditions.Select(c => $"{c.Nth}{c.Rank}{c.Suit}").ToList();
-        if (keys.Count != keys.Distinct().Count())
-            return EngineResult.Fail(g, "Duplicate partner conditions are not allowed.");
-
-        foreach (var c in conditions)
+        foreach (var c in unique)
         {
             if (c.Nth is not (1 or 2)) return EngineResult.Fail(g, "Nth must be 1 or 2.");
             if (!DeckFactory.CardExists(g.ActiveDeck, c.Rank, c.Suit))
@@ -107,7 +104,7 @@ public static class GameEngine
         }
 
         g.Trump = trump;
-        g.Conditions = conditions.ToList();
+        g.Conditions = unique;
         g.Phase = GamePhase.Playing;
         var leader = g.BidderSeat ?? 0;
         g.CurrentTurn = leader;
@@ -227,6 +224,33 @@ public static class GameEngine
         return options.Take(need).ToArray();
     }
 
+    private static List<PartnerCondition> DedupPartnerConditions(
+        GameState g,
+        IReadOnlyList<PartnerCondition> requested,
+        int need)
+    {
+        var used = new HashSet<string>();
+        var unique = new List<PartnerCondition>();
+        foreach (var c in requested)
+        {
+            var key = $"{c.Nth}{c.Rank}{c.Suit}";
+            if (!used.Add(key)) continue;
+            unique.Add(c);
+            if (unique.Count == need) return unique;
+        }
+        foreach (var extra in SuggestBotConditions(g).Concat(
+                     Suits.All.SelectMany(suit => new[] { "A", "K", "Q", "J", "10", "9", "8", "7", "6", "5", "4", "3", "2" }
+                         .Select(rank => new PartnerCondition(1, rank, suit)))))
+        {
+            var key = $"{extra.Nth}{extra.Rank}{extra.Suit}";
+            if (!used.Add(key)) continue;
+            if (!DeckFactory.CardExists(g.ActiveDeck, extra.Rank, extra.Suit)) continue;
+            unique.Add(extra);
+            if (unique.Count == need) return unique;
+        }
+        return unique;
+    }
+
     public static string SuggestBotTrump(SeatPlayer bidder)
     {
         return bidder.Hand
@@ -243,5 +267,50 @@ public static class GameEngine
         if (strength >= 100 && currentBid <= 160) return Math.Min(500, currentBid + 20);
         if (strength >= 75 && currentBid < 140) return currentBid + 10;
         return null;
+    }
+
+    /// <summary>Play one dummy action. Returns false when a human must act or the hand is over.</summary>
+    public static bool TakeBotAction(GameState g)
+    {
+        if (g.Phase is GamePhase.Complete or GamePhase.Cancelled) return false;
+        if (g.Phase == GamePhase.Selecting)
+        {
+            var bidder = g.Seat(g.BidderSeat ?? 0);
+            if (!bidder.IsBot) return false;
+            var pick = SelectTrumpAndPartners(g, bidder.Seat, SuggestBotTrump(bidder), SuggestBotConditions(g));
+            return pick.Ok;
+        }
+
+        var actor = g.Seat(g.CurrentTurn);
+        if (!actor.IsBot) return false;
+
+        if (g.Phase == GamePhase.Bidding)
+        {
+            var raise = SuggestBotBid(actor, g.Bid, g.HasAnyBid);
+            if (raise is int amount)
+            {
+                var bid = Bid(g, actor.Seat, amount);
+                if (bid.Ok) return true;
+            }
+            return Pass(g, actor.Seat).Ok;
+        }
+
+        if (g.Phase == GamePhase.Playing)
+            return AutoPlayLowest(g, actor.Seat).Ok;
+
+        return false;
+    }
+
+    public static void RunBots(GameState g)
+    {
+        for (var i = 0; i < 200; i++)
+        {
+            if (g.Phase == GamePhase.Playing)
+            {
+                TakeBotAction(g);
+                return;
+            }
+            if (!TakeBotAction(g)) return;
+        }
     }
 }

@@ -62,6 +62,72 @@ public class BiddingTests
     }
 }
 
+public class BotTests
+{
+    [Fact]
+    public void Dummy_players_bid_until_the_human_turn()
+    {
+        var human = Guid.NewGuid();
+        var seated = new List<(Guid, string, bool)> { (human, "You", false) };
+        for (var i = 0; i < 5; i++)
+            seated.Add((Guid.NewGuid(), $"Bot{i}", true));
+        var g = GameEngine.DealNewGame(Guid.NewGuid(), seated, 0, new Random(7));
+        Assert.True(g.Seat(g.CurrentTurn).IsBot);
+        GameEngine.RunBots(g);
+        Assert.Equal(GamePhase.Bidding, g.Phase);
+        Assert.Equal(0, g.CurrentTurn);
+        Assert.False(g.Seat(g.CurrentTurn).IsBot);
+        Assert.NotEmpty(g.BidLog);
+    }
+
+    [Fact]
+    public void Human_lead_stays_on_the_table_while_dummies_follow_one_at_a_time()
+    {
+        var human = Guid.NewGuid();
+        var seated = new List<(Guid, string, bool)> { (human, "You", false) };
+        for (var i = 0; i < 5; i++)
+            seated.Add((Guid.NewGuid(), $"Bot{i}", true));
+        var g = GameEngine.DealNewGame(Guid.NewGuid(), seated, 0, new Random(7));
+        GameEngine.RunBots(g);
+        var amount = g.HasAnyBid ? Math.Min(500, g.Bid + 10) : 100;
+        Assert.True(GameEngine.Bid(g, 0, amount).Ok);
+        while (g.Phase == GamePhase.Bidding)
+            Assert.True(GameEngine.Pass(g, g.CurrentTurn).Ok);
+        Assert.Equal(GamePhase.Selecting, g.Phase);
+        Assert.True(GameEngine.SelectTrumpAndPartners(g, 0, "S", GameEngine.SuggestBotConditions(g)).Ok);
+        GameEngine.RunBots(g);
+        Assert.Equal(GamePhase.Playing, g.Phase);
+        Assert.Equal(0, g.CurrentTurn);
+        Assert.Empty(g.CurrentTrick);
+        var lead = g.Seat(0).Hand[0];
+        Assert.True(GameEngine.PlayCard(g, 0, lead.Id).Ok);
+        GameEngine.RunBots(g);
+        Assert.Equal(2, g.CurrentTrick.Count);
+        Assert.Equal(lead.Id, g.CurrentTrick[0].Card.Id);
+    }
+
+    [Fact]
+    public void Duplicate_partner_picks_are_replaced_instead_of_rejected()
+    {
+        var seated = Enumerable.Range(0, 6)
+            .Select(i => (Guid.NewGuid(), $"P{i}", i > 0))
+            .ToList();
+        var g = GameEngine.DealNewGame(Guid.NewGuid(), seated, 0, new Random(3));
+        Assert.True(GameEngine.Bid(g, g.CurrentTurn, 100).Ok);
+        while (g.Phase == GamePhase.Bidding)
+            Assert.True(GameEngine.Pass(g, g.CurrentTurn).Ok);
+        var bidder = g.BidderSeat ?? 0;
+        var dup = new PartnerCondition[]
+        {
+            new(1, "A", "S"),
+            new(1, "A", "S"),
+        };
+        Assert.True(GameEngine.SelectTrumpAndPartners(g, bidder, "S", dup).Ok);
+        Assert.Equal(2, g.Conditions.Distinct().Count());
+        Assert.Equal(GamePhase.Playing, g.Phase);
+    }
+}
+
 public class ScoringTests
 {
     [Fact]

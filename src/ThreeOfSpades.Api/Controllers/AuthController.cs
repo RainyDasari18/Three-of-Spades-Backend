@@ -1,5 +1,3 @@
-using System.Security.Claims;
-using Microsoft.AspNetCore.Authentication;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
@@ -12,7 +10,7 @@ namespace ThreeOfSpades.Api.Controllers;
 
 [ApiController]
 [Route("api/auth")]
-public class AuthController(AppDbContext db, JwtTokenService jwt, IConfiguration config) : ControllerBase
+public class AuthController(AppDbContext db, JwtTokenService jwt) : ControllerBase
 {
     [HttpPost("register")]
     public async Task<ActionResult<AuthResponse>> Register(RegisterRequest req, CancellationToken ct)
@@ -68,81 +66,6 @@ public class AuthController(AppDbContext db, JwtTokenService jwt, IConfiguration
         user.UserName = name;
         await db.SaveChangesAsync(ct);
         return Ok(ToAuth(user));
-    }
-
-    [HttpGet("google")]
-    public IActionResult Google()
-    {
-        if (string.IsNullOrWhiteSpace(config["Authentication:Google:ClientId"]))
-            return BadRequest("Google OAuth is not configured.");
-        var props = new AuthenticationProperties { RedirectUri = "/api/auth/google/callback" };
-        return Challenge(props, "Google");
-    }
-
-    [HttpGet("google/callback")]
-    public Task<IActionResult> GoogleCallback(CancellationToken ct) => ExternalCallback("Google", "google", ct);
-
-    [HttpGet("github")]
-    public IActionResult GitHub()
-    {
-        if (string.IsNullOrWhiteSpace(config["Authentication:GitHub:ClientId"]))
-            return BadRequest("GitHub OAuth is not configured.");
-        var props = new AuthenticationProperties { RedirectUri = "/api/auth/github/callback" };
-        return Challenge(props, "GitHub");
-    }
-
-    [HttpGet("github/callback")]
-    public Task<IActionResult> GitHubCallback(CancellationToken ct) => ExternalCallback("GitHub", "github", ct);
-
-    private async Task<IActionResult> ExternalCallback(string scheme, string provider, CancellationToken ct)
-    {
-        var result = await HttpContext.AuthenticateAsync("External");
-        if (!result.Succeeded || result.Principal is null)
-            return Unauthorized("OAuth failed.");
-
-        var principal = result.Principal;
-        var externalId = principal.FindFirstValue(ClaimTypes.NameIdentifier) ?? "";
-        var email = (principal.FindFirstValue(ClaimTypes.Email) ?? $"{externalId}@{provider}.oauth").ToLowerInvariant();
-        var suggested = principal.FindFirstValue(ClaimTypes.Name)
-                        ?? principal.FindFirstValue("urn:github:login")
-                        ?? email.Split('@')[0];
-
-        User? user = provider == "google"
-            ? await db.Users.FirstOrDefaultAsync(u => u.GoogleId == externalId, ct)
-            : await db.Users.FirstOrDefaultAsync(u => u.GitHubId == externalId, ct);
-        user ??= await db.Users.FirstOrDefaultAsync(u => u.Email == email, ct);
-
-        if (user is null)
-        {
-            var unique = await UniqueUserName(suggested, ct);
-            user = new User { Email = email, UserName = unique };
-            if (provider == "google") user.GoogleId = externalId;
-            else user.GitHubId = externalId;
-            db.Users.Add(user);
-        }
-        else
-        {
-            if (provider == "google") user.GoogleId = externalId;
-            else user.GitHubId = externalId;
-        }
-        await db.SaveChangesAsync(ct);
-        await HttpContext.SignOutAsync("External");
-
-        var token = jwt.Create(user);
-        var front = config["Frontend:Origin"] ?? "http://localhost:5173";
-        return Redirect($"{front}/?token={Uri.EscapeDataString(token)}&needsUserName={(string.IsNullOrWhiteSpace(user.UserName) ? "true" : "false")}");
-    }
-
-    private async Task<string> UniqueUserName(string raw, CancellationToken ct)
-    {
-        var baseName = new string((raw ?? "player").Where(char.IsLetterOrDigit).ToArray());
-        if (baseName.Length < 2) baseName = "player";
-        if (baseName.Length > 18) baseName = baseName[..18];
-        var name = baseName;
-        var i = 1;
-        while (await db.Users.AnyAsync(u => u.UserName == name, ct))
-            name = $"{baseName}{i++}";
-        return name;
     }
 
     private AuthResponse ToAuth(User user) =>

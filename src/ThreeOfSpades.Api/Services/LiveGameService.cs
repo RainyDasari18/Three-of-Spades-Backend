@@ -35,14 +35,17 @@ public class LiveGameService(IServiceScopeFactory scopes, IHubContext<GameHub> h
         var ordered = room.Members.OrderBy(m => m.JoinedAt).ToList();
         var ownerIndex = Math.Max(0, ordered.FindIndex(m => m.UserId == room.OwnerId));
         var dealer = (ownerIndex + room.DealerIndex) % ordered.Count;
-        var seated = ordered.Select(m => (m.UserId, m.User.UserName, m.User.IsBot)).ToList();
+        var seated = ordered.Select(m => (m.UserId, m.User.UserName, RoomService.IsDummy(m.User))).ToList();
         var state = GameEngine.DealNewGame(room.Id, seated, dealer);
         room.ActiveGameId = state.GameId;
         await db.SaveChangesAsync(ct);
 
+        _tables.TryRemove(room.Id, out _);
         var table = new LiveTable { State = state };
         foreach (var p in state.Players)
             table.LastSeen[p.UserId] = DateTime.UtcNow;
+        lock (table.Gate)
+            GameEngine.RunBots(state);
         _tables[room.Id] = table;
         await Broadcast(table);
         return Snapshot(state, ownerId);
@@ -96,33 +99,55 @@ public class LiveGameService(IServiceScopeFactory scopes, IHubContext<GameHub> h
         foreach (var table in _tables.Values)
         {
             EngineResult? result = null;
+            var botsActed = false;
             lock (table.Gate)
             {
                 var g = table.State;
-                if (g.Phase is GamePhase.Complete or GamePhase.Cancelled) continue;
-                foreach (var p in g.Players.Where(x => !x.IsBot))
+                if (g.Phase == GamePhase.Complete)
+                    result = new EngineResult { Ok = true, State = g, GameFinished = true };
+                else if (g.Phase == GamePhase.Cancelled)
+                    result = new EngineResult { Ok = true, State = g, Cancelled = true };
+                else
                 {
-                    if (!table.OfflineSince.TryGetValue(p.UserId, out var since)) continue;
-                    var gone = DateTime.UtcNow - since;
-                    if (gone > TimeSpan.FromMinutes(5))
+                    foreach (var p in g.Players.Where(x => !x.IsBot))
                     {
-                        result = GameEngine.Cancel(g, "A player was offline for more than 5 minutes.");
-                        break;
+                        if (!table.OfflineSince.TryGetValue(p.UserId, out var since)) continue;
+                        var gone = DateTime.UtcNow - since;
+                        if (gone > TimeSpan.FromMinutes(5))
+                        {
+                            result = GameEngine.Cancel(g, "A player was offline for more than 5 minutes.");
+                            break;
+                        }
+                        if (g.Phase == GamePhase.Selecting && g.BidderSeat == p.Seat && gone > TimeSpan.FromMinutes(1))
+                        {
+                            result = GameEngine.Cancel(g, "Bidder disconnected during partner selection.");
+                            break;
+                        }
+                        if (g.Phase == GamePhase.Playing && g.CurrentTurn == p.Seat && gone > TimeSpan.FromMinutes(1))
+                        {
+                            result = GameEngine.AutoPlayLowest(g, p.Seat);
+                            table.LastSeen[p.UserId] = DateTime.UtcNow;
+                        }
                     }
-                    if (g.Phase == GamePhase.Selecting && g.BidderSeat == p.Seat && gone > TimeSpan.FromMinutes(1))
+                    if (result is null)
                     {
-                        result = GameEngine.Cancel(g, "Bidder disconnected during partner selection.");
-                        break;
-                    }
-                    if (g.Phase == GamePhase.Playing && g.CurrentTurn == p.Seat && gone > TimeSpan.FromMinutes(1))
-                    {
-                        result = GameEngine.AutoPlayLowest(g, p.Seat);
-                        table.LastSeen[p.UserId] = DateTime.UtcNow;
+                        var beforeTurn = g.CurrentTurn;
+                        var beforePhase = g.Phase;
+                        var beforeLog = g.BidLog.Count;
+                        GameEngine.RunBots(g);
+                        if (g.Phase == GamePhase.Complete)
+                            result = new EngineResult { Ok = true, State = g, GameFinished = true };
+                        else if (g.Phase == GamePhase.Cancelled)
+                            result = new EngineResult { Ok = true, State = g, Cancelled = true };
+                        else
+                            botsActed = g.CurrentTurn != beforeTurn || g.Phase != beforePhase || g.BidLog.Count != beforeLog;
                     }
                 }
             }
             if (result is not null)
                 await After(table, result);
+            else if (botsActed)
+                await Broadcast(table);
         }
     }
 
@@ -142,39 +167,52 @@ public class LiveGameService(IServiceScopeFactory scopes, IHubContext<GameHub> h
         return Snapshot(table.State, userId);
     }
 
-    private static void RunBots(GameState g)
+    public async Task TickBots()
     {
-        for (var guard = 0; guard < 80; guard++)
+        foreach (var table in _tables.Values)
         {
-            if (g.Phase is GamePhase.Complete or GamePhase.Cancelled) return;
-            if (g.Phase == GamePhase.Selecting)
+            var finished = false;
+            var cancelled = false;
+            var acted = false;
+            lock (table.Gate)
             {
-                var bidder = g.Seat(g.BidderSeat ?? 0);
-                if (!bidder.IsBot) return;
-                GameEngine.SelectTrumpAndPartners(g, bidder.Seat, GameEngine.SuggestBotTrump(bidder), GameEngine.SuggestBotConditions(g));
-                continue;
+                var g = table.State;
+                if (g.Phase == GamePhase.Complete)
+                    finished = true;
+                else if (g.Phase == GamePhase.Cancelled)
+                    cancelled = true;
+                else
+                {
+                    var beforeTurn = g.CurrentTurn;
+                    var beforePhase = g.Phase;
+                    var beforeLog = g.BidLog.Count;
+                    var beforeTrick = g.CurrentTrick.Count;
+                    GameEngine.RunBots(g);
+                    if (g.Phase == GamePhase.Complete) finished = true;
+                    else if (g.Phase == GamePhase.Cancelled) cancelled = true;
+                    else
+                        acted = g.CurrentTurn != beforeTurn || g.Phase != beforePhase
+                            || g.BidLog.Count != beforeLog || g.CurrentTrick.Count != beforeTrick;
+                }
             }
-            var actor = g.Seat(g.CurrentTurn);
-            if (!actor.IsBot) return;
-            if (g.Phase == GamePhase.Bidding)
-            {
-                var raise = GameEngine.SuggestBotBid(actor, g.Bid, g.HasAnyBid);
-                if (raise is int amount) GameEngine.Bid(g, actor.Seat, amount);
-                else GameEngine.Pass(g, actor.Seat);
-            }
-            else if (g.Phase == GamePhase.Playing)
-            {
-                GameEngine.AutoPlayLowest(g, actor.Seat);
-            }
-            else return;
+            if (finished)
+                await After(table, new EngineResult { Ok = true, State = table.State, GameFinished = true });
+            else if (cancelled)
+                await After(table, new EngineResult { Ok = true, State = table.State, Cancelled = true });
+            else if (acted)
+                await Broadcast(table);
         }
     }
 
+    private static void RunBots(GameState g) => GameEngine.RunBots(g);
+
     private async Task After(LiveTable table, EngineResult result)
     {
-        if (result.GameFinished)
+        var finished = result.GameFinished || table.State.Phase == GamePhase.Complete;
+        var cancelled = result.Cancelled || table.State.Phase == GamePhase.Cancelled;
+        if (finished)
             await PersistFinished(table.State);
-        if (result.Cancelled)
+        else if (cancelled)
             await ClearActive(table.State.RoomId);
         await Broadcast(table, result.Notices);
     }
@@ -184,6 +222,13 @@ public class LiveGameService(IServiceScopeFactory scopes, IHubContext<GameHub> h
         using var scope = scopes.CreateScope();
         var db = scope.ServiceProvider.GetRequiredService<AppDbContext>();
         var room = await db.Rooms.Include(r => r.Members).FirstAsync(r => r.Id == g.RoomId);
+        if (await db.Games.AnyAsync(x => x.Id == g.GameId))
+        {
+            room.ActiveGameId = null;
+            await db.SaveChangesAsync();
+            _tables.TryRemove(g.RoomId, out _);
+            return;
+        }
         var record = new GameRecord
         {
             Id = g.GameId,
@@ -195,6 +240,7 @@ public class LiveGameService(IServiceScopeFactory scopes, IHubContext<GameHub> h
             Success = g.Success == true,
             TeamPoints = g.TeamPoints,
             PartnerConditionsJson = JsonSerializer.Serialize(g.Conditions),
+            PlayedAt = DateTime.UtcNow,
             Players = g.Players.Select(p => new GamePlayerRecord
             {
                 GameId = g.GameId,
@@ -212,7 +258,7 @@ public class LiveGameService(IServiceScopeFactory scopes, IHubContext<GameHub> h
         room.DealerIndex = (room.DealerIndex + 1) % Math.Max(1, room.Members.Count);
         var users = await db.Users.Where(u => room.Members.Select(m => m.UserId).Contains(u.Id)).ToListAsync();
         foreach (var m in room.Members)
-            m.Ready = users.First(u => u.Id == m.UserId).IsBot;
+            m.Ready = users.FirstOrDefault(u => u.Id == m.UserId) is { } u && RoomService.IsDummy(u);
         await db.SaveChangesAsync();
         _tables.TryRemove(g.RoomId, out _);
     }

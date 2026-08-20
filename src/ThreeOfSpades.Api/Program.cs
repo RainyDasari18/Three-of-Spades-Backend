@@ -19,6 +19,7 @@ builder.Services.AddScoped<JwtTokenService>();
 builder.Services.AddScoped<RoomService>();
 builder.Services.AddSingleton<LiveGameService>();
 builder.Services.AddHostedService<DisconnectWorker>();
+builder.Services.AddHostedService<BotWorker>();
 builder.Services.AddControllers().AddJsonOptions(o =>
 {
     o.JsonSerializerOptions.PropertyNamingPolicy = JsonNamingPolicy.CamelCase;
@@ -30,64 +31,29 @@ builder.Services.AddSignalR().AddJsonProtocol(o =>
 builder.Services.AddEndpointsApiExplorer();
 builder.Services.AddSwaggerGen();
 
-var auth = builder.Services.AddAuthentication(options =>
-{
-    options.DefaultAuthenticateScheme = JwtBearerDefaults.AuthenticationScheme;
-    options.DefaultChallengeScheme = JwtBearerDefaults.AuthenticationScheme;
-    options.DefaultSignInScheme = "External";
-}).AddCookie("External", o =>
-{
-    o.Cookie.Name = "tos.oauth";
-    o.ExpireTimeSpan = TimeSpan.FromMinutes(10);
-}).AddJwtBearer(o =>
-{
-    o.TokenValidationParameters = new TokenValidationParameters
+builder.Services.AddAuthentication(JwtBearerDefaults.AuthenticationScheme)
+    .AddJwtBearer(o =>
     {
-        ValidateIssuer = true,
-        ValidateAudience = true,
-        ValidateIssuerSigningKey = true,
-        ValidIssuer = builder.Configuration["Jwt:Issuer"],
-        ValidAudience = builder.Configuration["Jwt:Audience"],
-        IssuerSigningKey = new SymmetricSecurityKey(Encoding.UTF8.GetBytes(jwtKey))
-    };
-    o.Events = new JwtBearerEvents
-    {
-        OnMessageReceived = ctx =>
+        o.TokenValidationParameters = new TokenValidationParameters
         {
-            var access = ctx.Request.Query["access_token"];
-            if (!string.IsNullOrEmpty(access) && ctx.HttpContext.Request.Path.StartsWithSegments("/hubs/game"))
-                ctx.Token = access;
-            return Task.CompletedTask;
-        }
-    };
-});
-
-var googleId = builder.Configuration["Authentication:Google:ClientId"];
-if (!string.IsNullOrWhiteSpace(googleId))
-{
-    auth.AddGoogle(o =>
-    {
-        o.ClientId = googleId;
-        o.ClientSecret = builder.Configuration["Authentication:Google:ClientSecret"] ?? "";
-        o.SignInScheme = "External";
-        o.CallbackPath = "/signin-google";
-        o.SaveTokens = true;
+            ValidateIssuer = true,
+            ValidateAudience = true,
+            ValidateIssuerSigningKey = true,
+            ValidIssuer = builder.Configuration["Jwt:Issuer"],
+            ValidAudience = builder.Configuration["Jwt:Audience"],
+            IssuerSigningKey = new SymmetricSecurityKey(Encoding.UTF8.GetBytes(jwtKey))
+        };
+        o.Events = new JwtBearerEvents
+        {
+            OnMessageReceived = ctx =>
+            {
+                var access = ctx.Request.Query["access_token"];
+                if (!string.IsNullOrEmpty(access) && ctx.HttpContext.Request.Path.StartsWithSegments("/hubs/game"))
+                    ctx.Token = access;
+                return Task.CompletedTask;
+            }
+        };
     });
-}
-
-var githubId = builder.Configuration["Authentication:GitHub:ClientId"];
-if (!string.IsNullOrWhiteSpace(githubId))
-{
-    auth.AddGitHub(o =>
-    {
-        o.ClientId = githubId!;
-        o.ClientSecret = builder.Configuration["Authentication:GitHub:ClientSecret"] ?? "";
-        o.SignInScheme = "External";
-        o.CallbackPath = "/signin-github";
-        o.Scope.Add("user:email");
-    });
-}
-
 builder.Services.AddAuthorization();
 builder.Services.AddCors(o => o.AddPolicy("app", p =>
     p.WithOrigins(frontend, "http://localhost:5173")
@@ -98,6 +64,16 @@ builder.Services.AddCors(o => o.AddPolicy("app", p =>
 var app = builder.Build();
 app.UseDomainErrors();
 app.UseCors("app");
+app.Use(async (ctx, next) =>
+{
+    ctx.Response.OnStarting(() =>
+    {
+        ctx.Response.Headers.CacheControl = "no-store, no-cache, private";
+        ctx.Response.Headers.Pragma = "no-cache";
+        return Task.CompletedTask;
+    });
+    await next();
+});
 app.UseSwagger();
 app.UseSwaggerUI();
 app.UseAuthentication();
@@ -110,6 +86,9 @@ using (var scope = app.Services.CreateScope())
 {
     var db = scope.ServiceProvider.GetRequiredService<AppDbContext>();
     await db.Database.EnsureCreatedAsync();
+    await db.Users
+        .Where(u => !u.IsBot && u.Email.EndsWith("@spades.local"))
+        .ExecuteUpdateAsync(u => u.SetProperty(x => x.IsBot, true));
 }
 
 app.Run();
