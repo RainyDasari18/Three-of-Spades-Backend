@@ -1,0 +1,304 @@
+using System.Collections.Concurrent;
+using System.Text.Json;
+using Microsoft.AspNetCore.SignalR;
+using Microsoft.EntityFrameworkCore;
+using ThreeOfSpades.Api.Contracts;
+using ThreeOfSpades.Api.Data;
+using ThreeOfSpades.Api.Domain;
+using ThreeOfSpades.Api.Hubs;
+using ThreeOfSpades.Engine;
+
+namespace ThreeOfSpades.Api.Services;
+
+public sealed class LiveTable
+{
+    public GameState State { get; set; } = null!;
+    public object Gate { get; } = new();
+    public Dictionary<Guid, DateTime> LastSeen { get; } = [];
+    public Dictionary<Guid, DateTime> OfflineSince { get; } = [];
+}
+
+public class LiveGameService(IServiceScopeFactory scopes, IHubContext<GameHub> hub)
+{
+    private readonly ConcurrentDictionary<Guid, LiveTable> _tables = new();
+
+    public LiveTable? Get(Guid roomId) => _tables.TryGetValue(roomId, out var t) ? t : null;
+
+    public IEnumerable<LiveTable> All() => _tables.Values;
+
+    public async Task<GameSnapshotDto> Start(Guid ownerId, Guid roomId, CancellationToken ct)
+    {
+        using var scope = scopes.CreateScope();
+        var rooms = scope.ServiceProvider.GetRequiredService<RoomService>();
+        var db = scope.ServiceProvider.GetRequiredService<AppDbContext>();
+        var room = await rooms.RequireStartable(ownerId, roomId, ct);
+        var ordered = room.Members.OrderBy(m => m.JoinedAt).ToList();
+        var ownerIndex = Math.Max(0, ordered.FindIndex(m => m.UserId == room.OwnerId));
+        var dealer = (ownerIndex + room.DealerIndex) % ordered.Count;
+        var seated = ordered.Select(m => (m.UserId, m.User.UserName, m.User.IsBot)).ToList();
+        var state = GameEngine.DealNewGame(room.Id, seated, dealer);
+        room.ActiveGameId = state.GameId;
+        await db.SaveChangesAsync(ct);
+
+        var table = new LiveTable { State = state };
+        foreach (var p in state.Players)
+            table.LastSeen[p.UserId] = DateTime.UtcNow;
+        _tables[room.Id] = table;
+        await Broadcast(table);
+        return Snapshot(state, ownerId);
+    }
+
+    public Task<GameSnapshotDto> Bid(Guid userId, Guid roomId, int amount) =>
+        Mutate(userId, roomId, (state, seat) => GameEngine.Bid(state, seat, amount));
+
+    public Task<GameSnapshotDto> Pass(Guid userId, Guid roomId) =>
+        Mutate(userId, roomId, (state, seat) => GameEngine.Pass(state, seat));
+
+    public Task<GameSnapshotDto> Select(Guid userId, Guid roomId, string trump, IReadOnlyList<PartnerCondition> conditions) =>
+        Mutate(userId, roomId, (state, seat) => GameEngine.SelectTrumpAndPartners(state, seat, trump, conditions));
+
+    public Task<GameSnapshotDto> Play(Guid userId, Guid roomId, string cardId) =>
+        Mutate(userId, roomId, (state, seat) => GameEngine.PlayCard(state, seat, cardId));
+
+    public GameSnapshotDto SnapshotFor(Guid userId, Guid roomId)
+    {
+        var table = Require(roomId);
+        lock (table.Gate) return Snapshot(table.State, userId);
+    }
+
+    public async Task Heartbeat(Guid userId, Guid roomId)
+    {
+        var table = Get(roomId);
+        if (table is null) return;
+        lock (table.Gate)
+        {
+            table.LastSeen[userId] = DateTime.UtcNow;
+            table.OfflineSince.Remove(userId);
+        }
+        using var scope = scopes.CreateScope();
+        await scope.ServiceProvider.GetRequiredService<RoomService>().SetOnline(userId, roomId, true, CancellationToken.None);
+    }
+
+    public async Task MarkOffline(Guid userId, Guid roomId)
+    {
+        var table = Get(roomId);
+        if (table is not null)
+        {
+            lock (table.Gate)
+                table.OfflineSince.TryAdd(userId, DateTime.UtcNow);
+        }
+        using var scope = scopes.CreateScope();
+        await scope.ServiceProvider.GetRequiredService<RoomService>().SetOnline(userId, roomId, false, CancellationToken.None);
+    }
+
+    public async Task TickDisconnects()
+    {
+        foreach (var table in _tables.Values)
+        {
+            EngineResult? result = null;
+            lock (table.Gate)
+            {
+                var g = table.State;
+                if (g.Phase is GamePhase.Complete or GamePhase.Cancelled) continue;
+                foreach (var p in g.Players.Where(x => !x.IsBot))
+                {
+                    if (!table.OfflineSince.TryGetValue(p.UserId, out var since)) continue;
+                    var gone = DateTime.UtcNow - since;
+                    if (gone > TimeSpan.FromMinutes(5))
+                    {
+                        result = GameEngine.Cancel(g, "A player was offline for more than 5 minutes.");
+                        break;
+                    }
+                    if (g.Phase == GamePhase.Selecting && g.BidderSeat == p.Seat && gone > TimeSpan.FromMinutes(1))
+                    {
+                        result = GameEngine.Cancel(g, "Bidder disconnected during partner selection.");
+                        break;
+                    }
+                    if (g.Phase == GamePhase.Playing && g.CurrentTurn == p.Seat && gone > TimeSpan.FromMinutes(1))
+                    {
+                        result = GameEngine.AutoPlayLowest(g, p.Seat);
+                        table.LastSeen[p.UserId] = DateTime.UtcNow;
+                    }
+                }
+            }
+            if (result is not null)
+                await After(table, result);
+        }
+    }
+
+    private async Task<GameSnapshotDto> Mutate(Guid userId, Guid roomId, Func<GameState, int, EngineResult> apply)
+    {
+        var table = Require(roomId);
+        EngineResult result;
+        lock (table.Gate)
+        {
+            var seat = table.State.Players.FindIndex(p => p.UserId == userId);
+            if (seat < 0) throw new InvalidOperationException("You are not seated in this game.");
+            result = apply(table.State, seat);
+            if (!result.Ok) throw new InvalidOperationException(result.Error);
+            RunBots(table.State);
+        }
+        await After(table, result);
+        return Snapshot(table.State, userId);
+    }
+
+    private static void RunBots(GameState g)
+    {
+        for (var guard = 0; guard < 80; guard++)
+        {
+            if (g.Phase is GamePhase.Complete or GamePhase.Cancelled) return;
+            if (g.Phase == GamePhase.Selecting)
+            {
+                var bidder = g.Seat(g.BidderSeat ?? 0);
+                if (!bidder.IsBot) return;
+                GameEngine.SelectTrumpAndPartners(g, bidder.Seat, GameEngine.SuggestBotTrump(bidder), GameEngine.SuggestBotConditions(g));
+                continue;
+            }
+            var actor = g.Seat(g.CurrentTurn);
+            if (!actor.IsBot) return;
+            if (g.Phase == GamePhase.Bidding)
+            {
+                var raise = GameEngine.SuggestBotBid(actor, g.Bid, g.HasAnyBid);
+                if (raise is int amount) GameEngine.Bid(g, actor.Seat, amount);
+                else GameEngine.Pass(g, actor.Seat);
+            }
+            else if (g.Phase == GamePhase.Playing)
+            {
+                GameEngine.AutoPlayLowest(g, actor.Seat);
+            }
+            else return;
+        }
+    }
+
+    private async Task After(LiveTable table, EngineResult result)
+    {
+        if (result.GameFinished)
+            await PersistFinished(table.State);
+        if (result.Cancelled)
+            await ClearActive(table.State.RoomId);
+        await Broadcast(table, result.Notices);
+    }
+
+    private async Task PersistFinished(GameState g)
+    {
+        using var scope = scopes.CreateScope();
+        var db = scope.ServiceProvider.GetRequiredService<AppDbContext>();
+        var room = await db.Rooms.Include(r => r.Members).FirstAsync(r => r.Id == g.RoomId);
+        var record = new GameRecord
+        {
+            Id = g.GameId,
+            RoomId = g.RoomId,
+            PlayerCount = g.PlayerCount,
+            Bid = g.Bid,
+            Trump = g.Trump ?? "S",
+            BidderName = g.Seat(g.BidderSeat ?? 0).UserName,
+            Success = g.Success == true,
+            TeamPoints = g.TeamPoints,
+            PartnerConditionsJson = JsonSerializer.Serialize(g.Conditions),
+            Players = g.Players.Select(p => new GamePlayerRecord
+            {
+                GameId = g.GameId,
+                UserId = p.UserId,
+                UserName = p.UserName,
+                Seat = p.Seat,
+                IsBidder = p.Seat == g.BidderSeat,
+                IsPartner = g.PartnerSeats.Contains(p.Seat) && p.Seat != g.BidderSeat,
+                PointsWon = p.PointsWon,
+                ScoreDelta = p.ScoreDelta
+            }).ToList()
+        };
+        db.Games.Add(record);
+        room.ActiveGameId = null;
+        room.DealerIndex = (room.DealerIndex + 1) % Math.Max(1, room.Members.Count);
+        var users = await db.Users.Where(u => room.Members.Select(m => m.UserId).Contains(u.Id)).ToListAsync();
+        foreach (var m in room.Members)
+            m.Ready = users.First(u => u.Id == m.UserId).IsBot;
+        await db.SaveChangesAsync();
+        _tables.TryRemove(g.RoomId, out _);
+    }
+
+    private async Task ClearActive(Guid roomId)
+    {
+        using var scope = scopes.CreateScope();
+        var db = scope.ServiceProvider.GetRequiredService<AppDbContext>();
+        var room = await db.Rooms.FindAsync(roomId);
+        if (room is not null)
+        {
+            room.ActiveGameId = null;
+            await db.SaveChangesAsync();
+        }
+        _tables.TryRemove(roomId, out _);
+    }
+
+    private async Task Broadcast(LiveTable table, IEnumerable<string>? notices = null)
+    {
+        foreach (var player in table.State.Players)
+        {
+            var snap = Snapshot(table.State, player.UserId);
+            await hub.Clients.Group($"user:{player.UserId}").SendAsync("gameUpdated", snap);
+        }
+        if (notices is not null)
+        {
+            foreach (var n in notices)
+                await hub.Clients.Group($"room:{table.State.RoomId}").SendAsync("notice", n);
+        }
+        using var scope = scopes.CreateScope();
+        var db = scope.ServiceProvider.GetRequiredService<AppDbContext>();
+        var room = await db.Rooms.Include(r => r.Members).ThenInclude(m => m.User).Include(r => r.Games).ThenInclude(g => g.Players)
+            .FirstOrDefaultAsync(r => r.Id == table.State.RoomId);
+        if (room is not null)
+        {
+            foreach (var m in room.Members)
+                await hub.Clients.Group($"user:{m.UserId}").SendAsync("roomUpdated", RoomService.ToDto(room, m.UserId));
+        }
+    }
+
+    private LiveTable Require(Guid roomId)
+    {
+        if (!_tables.TryGetValue(roomId, out var table))
+            throw new InvalidOperationException("No active game in this room.");
+        return table;
+    }
+
+    public static GameSnapshotDto Snapshot(GameState g, Guid viewerId)
+    {
+        var you = g.Players.FirstOrDefault(p => p.UserId == viewerId);
+        var hidePoints = g.Phase is GamePhase.Playing or GamePhase.Bidding or GamePhase.Selecting;
+        var playable = Array.Empty<CardDto>();
+        if (you is not null && g.Phase == GamePhase.Playing && g.CurrentTurn == you.Seat)
+            playable = CardRules.LegalCards(you.Hand, g.LeadSuit).Select(c => c.ToDto()).ToArray();
+
+        return new GameSnapshotDto(
+            g.GameId,
+            g.RoomId,
+            g.Phase.ToString().ToLowerInvariant(),
+            g.DealerSeat,
+            g.CurrentTurn,
+            g.Bid,
+            g.BidderSeat,
+            g.HasAnyBid,
+            g.Trump,
+            g.Conditions.Select(c => new PartnerConditionDto(c.Nth, c.Rank, c.Suit)).ToList(),
+            g.PartnerSeats,
+            g.BidLog.Select(b => new BidLogDto(b.Seat, b.Kind, b.Amount)).ToList(),
+            g.CurrentTrick.Select(t => new TrickPlayDto(t.Seat, t.Card.ToDto(), g.Seat(t.Seat).UserName)).ToList(),
+            g.LeadSuit,
+            Math.Min(g.TrickNumber, 13),
+            hidePoints ? 0 : g.TeamPoints,
+            g.Phase == GamePhase.Complete ? g.Success : null,
+            g.Players.Select(p => new PublicSeatDto(
+                p.UserId,
+                p.UserName,
+                p.Seat,
+                p.IsBot,
+                p.Hand.Count,
+                hidePoints ? null : p.PointsWon,
+                p.ScoreDelta,
+                p.Seat == g.BidderSeat,
+                g.PartnerSeats.Contains(p.Seat))).ToList(),
+            you?.Hand.Select(c => c.ToDto()).ToList() ?? [],
+            playable.ToList(),
+            g.CancelReason,
+            GameState.RuleVersion);
+    }
+}
