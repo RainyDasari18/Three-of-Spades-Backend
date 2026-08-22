@@ -10,7 +10,12 @@ using ThreeOfSpades.Api.Hubs;
 using ThreeOfSpades.Api.Services;
 
 var builder = WebApplication.CreateBuilder(args);
-var jwtKey = builder.Configuration["Jwt:Key"] ?? throw new InvalidOperationException("Jwt:Key missing.");
+var jwtKey = builder.Configuration["Jwt:Key"]?.Trim();
+if (string.IsNullOrWhiteSpace(jwtKey) || jwtKey.Length < 32)
+    throw new InvalidOperationException("Jwt:Key must be set (at least 32 characters). Use Jwt__Key in production.");
+if (!builder.Environment.IsDevelopment() &&
+    jwtKey == "dev-only-change-me-three-of-spades-super-secret-key!")
+    throw new InvalidOperationException("Do not use the development Jwt:Key in production.");
 var frontend = builder.Configuration["Frontend:Origin"] ?? "http://localhost:5173";
 
 builder.Services.AddDbContext<AppDbContext>(o =>
