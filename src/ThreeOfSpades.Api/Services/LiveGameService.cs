@@ -12,10 +12,15 @@ namespace ThreeOfSpades.Api.Services;
 
 public sealed class LiveTable
 {
+    public static readonly TimeSpan TurnLimit = TimeSpan.FromMinutes(1);
+
     public GameState State { get; set; } = null!;
     public object Gate { get; } = new();
     public Dictionary<Guid, DateTime> LastSeen { get; } = [];
     public Dictionary<Guid, DateTime> OfflineSince { get; } = [];
+    public DateTime TurnDeadline { get; set; }
+    public int DeadlineSeat { get; set; } = -1;
+    public GamePhase DeadlinePhase { get; set; }
 }
 
 public class LiveGameService(IServiceScopeFactory scopes, IHubContext<GameHub> hub)
@@ -45,10 +50,13 @@ public class LiveGameService(IServiceScopeFactory scopes, IHubContext<GameHub> h
         foreach (var p in state.Players)
             table.LastSeen[p.UserId] = DateTime.UtcNow;
         lock (table.Gate)
+        {
             GameEngine.RunBots(state);
+            RefreshTurnDeadline(table);
+        }
         _tables[room.Id] = table;
         await Broadcast(table);
-        return Snapshot(state, ownerId);
+        return Snapshot(table, ownerId);
     }
 
     public Task<GameSnapshotDto> Bid(Guid userId, Guid roomId, int amount) =>
@@ -66,7 +74,12 @@ public class LiveGameService(IServiceScopeFactory scopes, IHubContext<GameHub> h
     public GameSnapshotDto SnapshotFor(Guid userId, Guid roomId)
     {
         var table = Require(roomId);
-        lock (table.Gate) return Snapshot(table.State, userId);
+        lock (table.Gate)
+        {
+            if (table.State.Players.All(p => p.UserId != userId))
+                throw new InvalidOperationException("You are not seated in this game.");
+            return Snapshot(table, userId);
+        }
     }
 
     public async Task Heartbeat(Guid userId, Guid roomId)
@@ -118,17 +131,8 @@ public class LiveGameService(IServiceScopeFactory scopes, IHubContext<GameHub> h
                             result = GameEngine.Cancel(g, "A player was offline for more than 5 minutes.");
                             break;
                         }
-                        if (g.Phase == GamePhase.Selecting && g.BidderSeat == p.Seat && gone > TimeSpan.FromMinutes(1))
-                        {
-                            result = GameEngine.Cancel(g, "Bidder disconnected during partner selection.");
-                            break;
-                        }
-                        if (g.Phase == GamePhase.Playing && g.CurrentTurn == p.Seat && gone > TimeSpan.FromMinutes(1))
-                        {
-                            result = GameEngine.AutoPlayLowest(g, p.Seat);
-                            table.LastSeen[p.UserId] = DateTime.UtcNow;
-                        }
                     }
+                    result ??= ExpireTurn(table);
                     if (result is null)
                     {
                         var beforeTurn = g.CurrentTurn;
@@ -142,6 +146,9 @@ public class LiveGameService(IServiceScopeFactory scopes, IHubContext<GameHub> h
                         else
                             botsActed = g.CurrentTurn != beforeTurn || g.Phase != beforePhase || g.BidLog.Count != beforeLog;
                     }
+                    else if (result.Ok && g.Phase is not GamePhase.Complete and not GamePhase.Cancelled)
+                        GameEngine.RunBots(g);
+                    RefreshTurnDeadline(table);
                 }
             }
             if (result is not null)
@@ -162,9 +169,10 @@ public class LiveGameService(IServiceScopeFactory scopes, IHubContext<GameHub> h
             result = apply(table.State, seat);
             if (!result.Ok) throw new InvalidOperationException(result.Error);
             RunBots(table.State);
+            RefreshTurnDeadline(table);
         }
         await After(table, result);
-        return Snapshot(table.State, userId);
+        return Snapshot(table, userId);
     }
 
     public async Task TickBots()
@@ -193,6 +201,7 @@ public class LiveGameService(IServiceScopeFactory scopes, IHubContext<GameHub> h
                     else
                         acted = g.CurrentTurn != beforeTurn || g.Phase != beforePhase
                             || g.BidLog.Count != beforeLog || g.CurrentTrick.Count != beforeTrick;
+                    RefreshTurnDeadline(table);
                 }
             }
             if (finished)
@@ -280,7 +289,7 @@ public class LiveGameService(IServiceScopeFactory scopes, IHubContext<GameHub> h
     {
         foreach (var player in table.State.Players)
         {
-            var snap = Snapshot(table.State, player.UserId);
+            var snap = Snapshot(table, player.UserId);
             await hub.Clients.Group($"user:{player.UserId}").SendAsync("gameUpdated", snap);
         }
         if (notices is not null)
@@ -306,7 +315,76 @@ public class LiveGameService(IServiceScopeFactory scopes, IHubContext<GameHub> h
         return table;
     }
 
-    public static GameSnapshotDto Snapshot(GameState g, Guid viewerId)
+    private static int ActorSeat(GameState g) =>
+        g.Phase == GamePhase.Selecting ? g.BidderSeat ?? g.CurrentTurn : g.CurrentTurn;
+
+    private static void RefreshTurnDeadline(LiveTable table)
+    {
+        var g = table.State;
+        if (g.Phase is GamePhase.Complete or GamePhase.Cancelled) return;
+        var seat = ActorSeat(g);
+        if (table.DeadlineSeat == seat && table.DeadlinePhase == g.Phase) return;
+        table.DeadlineSeat = seat;
+        table.DeadlinePhase = g.Phase;
+        table.TurnDeadline = DateTime.UtcNow.Add(LiveTable.TurnLimit);
+    }
+
+    private static EngineResult? ExpireTurn(LiveTable table)
+    {
+        var g = table.State;
+        if (g.Phase is GamePhase.Complete or GamePhase.Cancelled) return null;
+        RefreshTurnDeadline(table);
+        if (DateTime.UtcNow < table.TurnDeadline) return null;
+
+        EngineResult result;
+        string notice;
+        if (g.Phase == GamePhase.Playing)
+        {
+            result = GameEngine.AutoPlayLowest(g, g.CurrentTurn);
+            notice = "Time's up — the lowest legal card was played.";
+        }
+        else if (g.Phase == GamePhase.Bidding)
+        {
+            result = GameEngine.Pass(g, g.CurrentTurn);
+            notice = "Time's up — passed.";
+        }
+        else if (g.Phase == GamePhase.Selecting)
+        {
+            var bidder = g.Seat(g.BidderSeat ?? 0);
+            result = GameEngine.SelectTrumpAndPartners(
+                g,
+                bidder.Seat,
+                GameEngine.SuggestBotTrump(bidder),
+                GameEngine.SuggestBotConditions(g));
+            notice = "Time's up — trump and partners were chosen automatically.";
+        }
+        else return null;
+
+        if (!result.Ok)
+        {
+            table.TurnDeadline = DateTime.UtcNow.Add(LiveTable.TurnLimit);
+            return null;
+        }
+        table.DeadlineSeat = -1;
+        RefreshTurnDeadline(table);
+        return new EngineResult
+        {
+            Ok = true,
+            State = g,
+            GameFinished = result.GameFinished,
+            Notices = [.. result.Notices, notice]
+        };
+    }
+
+    public static GameSnapshotDto Snapshot(LiveTable table, Guid viewerId)
+    {
+        var iso = table.State.Phase is GamePhase.Bidding or GamePhase.Selecting or GamePhase.Playing
+            ? table.TurnDeadline.ToUniversalTime().ToString("O")
+            : null;
+        return Snapshot(table.State, viewerId, iso);
+    }
+
+    public static GameSnapshotDto Snapshot(GameState g, Guid viewerId, string? turnEndsAt = null)
     {
         var you = g.Players.FirstOrDefault(p => p.UserId == viewerId);
         var hidePoints = g.Phase is GamePhase.Playing or GamePhase.Bidding or GamePhase.Selecting;
@@ -345,6 +423,7 @@ public class LiveGameService(IServiceScopeFactory scopes, IHubContext<GameHub> h
             you?.Hand.Select(c => c.ToDto()).ToList() ?? [],
             playable.ToList(),
             g.CancelReason,
-            GameState.RuleVersion);
+            GameState.RuleVersion,
+            turnEndsAt);
     }
 }

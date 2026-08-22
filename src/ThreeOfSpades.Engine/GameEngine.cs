@@ -174,7 +174,9 @@ public static class GameEngine
     public static EngineResult AutoPlayLowest(GameState g, int seat)
     {
         if (g.Phase != GamePhase.Playing) return EngineResult.Fail(g, "Not playing.");
-        var card = CardRules.LowestLegal(g.Seat(seat).Hand, g.LeadSuit);
+        var hand = g.Seat(seat).Hand;
+        if (hand.Count == 0) return EngineResult.Fail(g, "No cards left to play.");
+        var card = CardRules.LowestLegal(hand, g.LeadSuit);
         return PlayCard(g, seat, card.Id);
     }
 

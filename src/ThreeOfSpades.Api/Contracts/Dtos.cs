@@ -95,7 +95,8 @@ public record GameSnapshotDto(
     List<CardDto> YourHand,
     List<CardDto> Playable,
     string? CancelReason,
-    string RuleVersion);
+    string RuleVersion,
+    string? TurnEndsAt);
 
 public static class Mappers
 {

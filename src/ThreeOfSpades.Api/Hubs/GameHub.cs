@@ -20,18 +20,21 @@ public class GameHub(LiveGameService games, RoomService rooms) : Hub
 
     public async Task JoinRoom(Guid roomId)
     {
-        await rooms.Get(UserId, roomId, Context.ConnectionAborted);
-        Context.Items["roomId"] = roomId;
-        await Groups.AddToGroupAsync(Context.ConnectionId, $"room:{roomId}");
-        await games.Heartbeat(UserId, roomId);
-        var live = games.Get(roomId);
-        if (live is not null && live.State.Phase is not GamePhase.Complete and not GamePhase.Cancelled)
+        await Safe(async () =>
         {
-            GameSnapshotDto snap;
-            lock (live.Gate)
-                snap = LiveGameService.Snapshot(live.State, UserId);
-            await Clients.Caller.SendAsync("gameUpdated", snap);
-        }
+            await rooms.Get(UserId, roomId, Context.ConnectionAborted);
+            Context.Items["roomId"] = roomId;
+            await Groups.AddToGroupAsync(Context.ConnectionId, $"room:{roomId}");
+            await games.Heartbeat(UserId, roomId);
+            var live = games.Get(roomId);
+            if (live is not null && live.State.Phase is not GamePhase.Complete and not GamePhase.Cancelled)
+            {
+                GameSnapshotDto snap;
+                lock (live.Gate)
+                    snap = LiveGameService.Snapshot(live, UserId);
+                await Clients.Caller.SendAsync("gameUpdated", snap);
+            }
+        });
     }
 
     public Task PlaceBid(Guid roomId, int amount) => Safe(() => games.Bid(UserId, roomId, amount));

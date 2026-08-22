@@ -17,16 +17,19 @@ public class AuthController(AppDbContext db, JwtTokenService jwt) : ControllerBa
     {
         if (string.IsNullOrWhiteSpace(req.Email) || string.IsNullOrWhiteSpace(req.Password) || string.IsNullOrWhiteSpace(req.UserName))
             return BadRequest("Email, password, and userName are required.");
-        if (req.UserName.Length is < 2 or > 24) return BadRequest("UserName must be 2–24 characters.");
-        if (await db.Users.AnyAsync(u => u.Email == req.Email.Trim().ToLowerInvariant(), ct))
+        if (req.Password.Length < 6) return BadRequest("Password must be at least 6 characters.");
+        var userName = req.UserName.Trim();
+        if (userName.Length is < 2 or > 24) return BadRequest("UserName must be 2–24 characters.");
+        var email = req.Email.Trim().ToLowerInvariant();
+        if (await db.Users.AnyAsync(u => u.Email == email, ct))
             return Conflict("Email already registered.");
-        if (await db.Users.AnyAsync(u => u.UserName == req.UserName.Trim(), ct))
+        if (await db.Users.AnyAsync(u => u.UserName.ToLower() == userName.ToLower(), ct))
             return Conflict("UserName is taken.");
 
         var user = new User
         {
-            Email = req.Email.Trim().ToLowerInvariant(),
-            UserName = req.UserName.Trim(),
+            Email = email,
+            UserName = userName,
             PasswordHash = BCrypt.Net.BCrypt.HashPassword(req.Password)
         };
         db.Users.Add(user);
@@ -37,6 +40,8 @@ public class AuthController(AppDbContext db, JwtTokenService jwt) : ControllerBa
     [HttpPost("login")]
     public async Task<ActionResult<AuthResponse>> Login(LoginRequest req, CancellationToken ct)
     {
+        if (string.IsNullOrWhiteSpace(req.Email) || string.IsNullOrWhiteSpace(req.Password))
+            return BadRequest("Email and password are required.");
         var email = req.Email.Trim().ToLowerInvariant();
         var user = await db.Users.FirstOrDefaultAsync(u => u.Email == email && !u.IsBot, ct);
         if (user?.PasswordHash is null || !BCrypt.Net.BCrypt.Verify(req.Password, user.PasswordHash))
@@ -57,11 +62,13 @@ public class AuthController(AppDbContext db, JwtTokenService jwt) : ControllerBa
     [HttpPut("username")]
     public async Task<ActionResult<AuthResponse>> SetUserName(SetUserNameRequest req, CancellationToken ct)
     {
+        if (string.IsNullOrWhiteSpace(req.UserName))
+            return BadRequest("UserName must be 2–24 characters.");
         var name = req.UserName.Trim();
         if (name.Length is < 2 or > 24) return BadRequest("UserName must be 2–24 characters.");
         var user = await db.Users.FindAsync([JwtTokenService.UserId(User)], ct);
         if (user is null) return Unauthorized();
-        if (await db.Users.AnyAsync(u => u.UserName == name && u.Id != user.Id, ct))
+        if (await db.Users.AnyAsync(u => u.UserName.ToLower() == name.ToLower() && u.Id != user.Id, ct))
             return Conflict("UserName is taken.");
         user.UserName = name;
         await db.SaveChangesAsync(ct);

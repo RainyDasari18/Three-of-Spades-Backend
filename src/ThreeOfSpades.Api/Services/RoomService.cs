@@ -28,7 +28,7 @@ public class RoomService(AppDbContext db, IHubContext<GameHub> hub)
         var room = new Room
         {
             Name = string.IsNullOrWhiteSpace(name) ? "New room" : name.Trim(),
-            Code = MakeCode(name),
+            Code = await MakeUniqueCode(name, ct),
             OwnerId = userId
         };
         room.Members.Add(new RoomMember { UserId = userId, User = user, Ready = false, Online = true });
@@ -39,12 +39,14 @@ public class RoomService(AppDbContext db, IHubContext<GameHub> hub)
 
     public async Task<RoomDto> Join(Guid userId, string code, CancellationToken ct)
     {
+        if (string.IsNullOrWhiteSpace(code)) throw new InvalidOperationException("Room code is required.");
         var room = await LoadByCode(code, ct) ?? throw new InvalidOperationException("No room found for that code.");
         if (room.Archived) throw new InvalidOperationException("Room is archived.");
-        if (room.ActiveGameId is not null) throw new InvalidOperationException("Cannot join after a game has started.");
-        if (room.Members.Count >= 8) throw new InvalidOperationException("Room is full (max 8).");
-        if (room.Members.All(m => m.UserId != userId))
+        var already = room.Members.Any(m => m.UserId == userId);
+        if (!already)
         {
+            if (room.ActiveGameId is not null) throw new InvalidOperationException("Cannot join after a game has started.");
+            if (room.Members.Count >= 8) throw new InvalidOperationException("Room is full (max 8).");
             room.Members.Add(new RoomMember { RoomId = room.Id, UserId = userId, Ready = false, Online = true });
             await db.SaveChangesAsync(ct);
             await db.Entry(room).Collection(r => r.Members).Query().Include(m => m.User).LoadAsync(ct);
@@ -70,6 +72,7 @@ public class RoomService(AppDbContext db, IHubContext<GameHub> hub)
     {
         var room = await Load(roomId, ct) ?? throw new InvalidOperationException("Room not found.");
         EnsureMember(room, userId);
+        if (room.Archived) throw new InvalidOperationException("Room is archived.");
         if (room.ActiveGameId is not null) throw new InvalidOperationException("Game is already active.");
         var m = room.Members.First(x => x.UserId == userId);
         m.Ready = !m.Ready;
@@ -91,15 +94,19 @@ public class RoomService(AppDbContext db, IHubContext<GameHub> hub)
     {
         var room = await Load(roomId, ct) ?? throw new InvalidOperationException("Room not found.");
         EnsureOwner(room, userId);
+        if (room.Archived) throw new InvalidOperationException("Room is archived.");
         if (room.ActiveGameId is not null) throw new InvalidOperationException("Game is already active.");
         foreach (var name in BotNames)
         {
             if (room.Members.Count >= 6) break;
-            if (room.Members.Any(m => m.User.UserName == name)) continue;
+            if (room.Members.Any(m => m.User.UserName == name || m.User.Email == $"bot-{name.ToLowerInvariant()}@spades.local"))
+                continue;
             var email = $"bot-{name.ToLowerInvariant()}@spades.local";
-            var bot = await db.Users.FirstOrDefaultAsync(u => u.Email == email, ct);
+            var bot = await db.Users.FirstOrDefaultAsync(u => u.Email == email && u.IsBot, ct);
             if (bot is null)
             {
+                if (await db.Users.AnyAsync(u => u.Email == email, ct))
+                    email = $"bot-{name.ToLowerInvariant()}-{room.Id.ToString("N")[..8]}@spades.local";
                 bot = new User { Email = email, UserName = name, IsBot = true };
                 db.Users.Add(bot);
             }
@@ -122,17 +129,26 @@ public class RoomService(AppDbContext db, IHubContext<GameHub> hub)
                      ?? throw new InvalidOperationException("Not a member.");
         db.RoomMembers.Remove(member);
         await db.SaveChangesAsync(ct);
-        return ToDto((await Load(roomId, ct))!, ownerId);
+        var loaded = (await Load(roomId, ct))!;
+        await NotifyRoom(loaded);
+        await hub.Clients.Group($"user:{targetId}").SendAsync("kickedFromRoom", roomId);
+        return ToDto(loaded, ownerId);
     }
 
     public async Task<RoomDto> Transfer(Guid ownerId, Guid roomId, Guid targetId, CancellationToken ct)
     {
         var room = await Load(roomId, ct) ?? throw new InvalidOperationException("Room not found.");
         EnsureOwner(room, ownerId);
-        if (room.Members.All(m => m.UserId != targetId)) throw new InvalidOperationException("Not a member.");
+        if (room.ActiveGameId is not null) throw new InvalidOperationException("Cannot transfer ownership during a game.");
+        if (targetId == ownerId) throw new InvalidOperationException("You already own this room.");
+        var member = room.Members.FirstOrDefault(m => m.UserId == targetId)
+                     ?? throw new InvalidOperationException("Not a member.");
+        if (IsDummy(member.User)) throw new InvalidOperationException("Cannot transfer ownership to a dummy player.");
         room.OwnerId = targetId;
         await db.SaveChangesAsync(ct);
-        return ToDto((await Load(roomId, ct))!, ownerId);
+        var loaded = (await Load(roomId, ct))!;
+        await NotifyRoom(loaded);
+        return ToDto(loaded, ownerId);
     }
 
     public async Task Archive(Guid ownerId, Guid roomId, CancellationToken ct)
@@ -142,6 +158,7 @@ public class RoomService(AppDbContext db, IHubContext<GameHub> hub)
         if (room.ActiveGameId is not null) throw new InvalidOperationException("Cannot archive during a game.");
         room.Archived = true;
         await db.SaveChangesAsync(ct);
+        await NotifyRoom(room);
     }
 
     public async Task Leave(Guid userId, Guid roomId, CancellationToken ct)
@@ -152,13 +169,16 @@ public class RoomService(AppDbContext db, IHubContext<GameHub> hub)
         var member = room.Members.FirstOrDefault(m => m.UserId == userId)
                      ?? throw new InvalidOperationException("Not a member.");
         db.RoomMembers.Remove(member);
+        var remaining = room.Members.Where(m => m.UserId != userId).ToList();
         if (room.OwnerId == userId)
         {
-            var next = room.Members.Where(m => m.UserId != userId).OrderBy(m => m.JoinedAt).FirstOrDefault();
-            if (next is null) room.Archived = true;
-            else room.OwnerId = next.UserId;
+            var nextHuman = remaining.Where(m => !IsDummy(m.User)).OrderBy(m => m.JoinedAt).FirstOrDefault();
+            if (nextHuman is null) room.Archived = true;
+            else room.OwnerId = nextHuman.UserId;
         }
         await db.SaveChangesAsync(ct);
+        if (remaining.Count > 0)
+            await NotifyRoom((await Load(roomId, ct))!);
     }
 
     public async Task<Room> RequireStartable(Guid ownerId, Guid roomId, CancellationToken ct)
@@ -166,6 +186,7 @@ public class RoomService(AppDbContext db, IHubContext<GameHub> hub)
         var room = await Load(roomId, ct) ?? throw new InvalidOperationException("Room not found.");
         EnsureOwner(room, ownerId);
         if (room.Archived) throw new InvalidOperationException("Room is archived.");
+        if (room.ActiveGameId is not null) throw new InvalidOperationException("Game is already active.");
         var n = room.Members.Count;
         if (n is < 5 or > 8) throw new InvalidOperationException("Need 5–8 players to start.");
         if (room.Members.Any(m => !m.Online || !m.Ready))
@@ -201,6 +222,17 @@ public class RoomService(AppDbContext db, IHubContext<GameHub> hub)
     private static void EnsureOwner(Room room, Guid userId)
     {
         if (room.OwnerId != userId) throw new InvalidOperationException("Only the room owner can do that.");
+    }
+
+    private async Task<string> MakeUniqueCode(string name, CancellationToken ct)
+    {
+        for (var i = 0; i < 24; i++)
+        {
+            var code = MakeCode(name);
+            if (!await db.Rooms.AnyAsync(r => r.Code == code, ct))
+                return code;
+        }
+        return $"R{Guid.NewGuid().ToString("N")[..7]}".ToUpperInvariant();
     }
 
     private static string MakeCode(string name)
