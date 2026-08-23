@@ -13,7 +13,7 @@ namespace ThreeOfSpades.Api.Services;
 public sealed class LiveTable
 {
     public static readonly TimeSpan TurnLimit = TimeSpan.FromMinutes(1);
-    public static readonly TimeSpan TrickReveal = TimeSpan.FromSeconds(3.5);
+    public static readonly TimeSpan TrickReveal = TimeSpan.FromSeconds(5);
 
     public GameState State { get; set; } = null!;
     public object Gate { get; } = new();
@@ -130,9 +130,6 @@ public class LiveGameService(IServiceScopeFactory scopes, IHubContext<GameHub> h
                     }
                     else
                     {
-                        var tricksBefore = g.CompletedTricks.Count;
-                        GameEngine.RunBots(g);
-                        BeginRevealIfNeeded(table, tricksBefore);
                         RefreshTurnDeadline(table);
                         botsActed = true;
                     }
@@ -237,9 +234,6 @@ public class LiveGameService(IServiceScopeFactory scopes, IHubContext<GameHub> h
                     }
                     else
                     {
-                        var tricksBefore = g.CompletedTricks.Count;
-                        GameEngine.RunBots(g);
-                        BeginRevealIfNeeded(table, tricksBefore);
                         RefreshTurnDeadline(table);
                         acted = true;
                     }
