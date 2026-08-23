@@ -13,6 +13,7 @@ namespace ThreeOfSpades.Api.Services;
 public sealed class LiveTable
 {
     public static readonly TimeSpan TurnLimit = TimeSpan.FromMinutes(1);
+    public static readonly TimeSpan TrickReveal = TimeSpan.FromSeconds(3.5);
 
     public GameState State { get; set; } = null!;
     public object Gate { get; } = new();
@@ -21,6 +22,8 @@ public sealed class LiveTable
     public DateTime TurnDeadline { get; set; }
     public int DeadlineSeat { get; set; } = -1;
     public GamePhase DeadlinePhase { get; set; }
+    public DateTime? RevealUntil { get; set; }
+    public bool FinishAfterReveal { get; set; }
 }
 
 public class LiveGameService(IServiceScopeFactory scopes, IHubContext<GameHub> hub)
@@ -116,7 +119,25 @@ public class LiveGameService(IServiceScopeFactory scopes, IHubContext<GameHub> h
             lock (table.Gate)
             {
                 var g = table.State;
-                if (g.Phase == GamePhase.Complete)
+                if (IsRevealing(table))
+                    continue;
+                if (ReleaseReveal(table))
+                {
+                    if (table.FinishAfterReveal)
+                    {
+                        table.FinishAfterReveal = false;
+                        result = new EngineResult { Ok = true, State = g, GameFinished = true };
+                    }
+                    else
+                    {
+                        var tricksBefore = g.CompletedTricks.Count;
+                        GameEngine.RunBots(g);
+                        BeginRevealIfNeeded(table, tricksBefore);
+                        RefreshTurnDeadline(table);
+                        botsActed = true;
+                    }
+                }
+                else if (g.Phase == GamePhase.Complete)
                     result = new EngineResult { Ok = true, State = g, GameFinished = true };
                 else if (g.Phase == GamePhase.Cancelled)
                     result = new EngineResult { Ok = true, State = g, Cancelled = true };
@@ -138,8 +159,12 @@ public class LiveGameService(IServiceScopeFactory scopes, IHubContext<GameHub> h
                         var beforeTurn = g.CurrentTurn;
                         var beforePhase = g.Phase;
                         var beforeLog = g.BidLog.Count;
+                        var tricksBefore = g.CompletedTricks.Count;
                         GameEngine.RunBots(g);
-                        if (g.Phase == GamePhase.Complete)
+                        BeginRevealIfNeeded(table, tricksBefore);
+                        if (IsRevealing(table))
+                            botsActed = true;
+                        else if (g.Phase == GamePhase.Complete)
                             result = new EngineResult { Ok = true, State = g, GameFinished = true };
                         else if (g.Phase == GamePhase.Cancelled)
                             result = new EngineResult { Ok = true, State = g, Cancelled = true };
@@ -147,8 +172,14 @@ public class LiveGameService(IServiceScopeFactory scopes, IHubContext<GameHub> h
                             botsActed = g.CurrentTurn != beforeTurn || g.Phase != beforePhase || g.BidLog.Count != beforeLog;
                     }
                     else if (result.Ok && g.Phase is not GamePhase.Complete and not GamePhase.Cancelled)
-                        GameEngine.RunBots(g);
-                    RefreshTurnDeadline(table);
+                    {
+                        var tricksBefore = g.CompletedTricks.Count;
+                        BeginRevealIfNeeded(table, tricksBefore);
+                        if (!IsRevealing(table))
+                            GameEngine.RunBots(g);
+                    }
+                    if (!IsRevealing(table))
+                        RefreshTurnDeadline(table);
                 }
             }
             if (result is not null)
@@ -164,12 +195,22 @@ public class LiveGameService(IServiceScopeFactory scopes, IHubContext<GameHub> h
         EngineResult result;
         lock (table.Gate)
         {
+            if (IsRevealing(table) && table.State.Phase == GamePhase.Playing)
+                throw new InvalidOperationException("The last trick is still on the table.");
             var seat = table.State.Players.FindIndex(p => p.UserId == userId);
             if (seat < 0) throw new InvalidOperationException("You are not seated in this game.");
+            var tricksBefore = table.State.CompletedTricks.Count;
             result = apply(table.State, seat);
             if (!result.Ok) throw new InvalidOperationException(result.Error);
-            RunBots(table.State);
-            RefreshTurnDeadline(table);
+            BeginRevealIfNeeded(table, tricksBefore);
+            if (!IsRevealing(table))
+            {
+                tricksBefore = table.State.CompletedTricks.Count;
+                RunBots(table.State);
+                BeginRevealIfNeeded(table, tricksBefore);
+            }
+            if (!IsRevealing(table))
+                RefreshTurnDeadline(table);
         }
         await After(table, result);
         return Snapshot(table, userId);
@@ -185,7 +226,25 @@ public class LiveGameService(IServiceScopeFactory scopes, IHubContext<GameHub> h
             lock (table.Gate)
             {
                 var g = table.State;
-                if (g.Phase == GamePhase.Complete)
+                if (IsRevealing(table))
+                    continue;
+                if (ReleaseReveal(table))
+                {
+                    if (table.FinishAfterReveal)
+                    {
+                        table.FinishAfterReveal = false;
+                        finished = true;
+                    }
+                    else
+                    {
+                        var tricksBefore = g.CompletedTricks.Count;
+                        GameEngine.RunBots(g);
+                        BeginRevealIfNeeded(table, tricksBefore);
+                        RefreshTurnDeadline(table);
+                        acted = true;
+                    }
+                }
+                else if (g.Phase == GamePhase.Complete)
                     finished = true;
                 else if (g.Phase == GamePhase.Cancelled)
                     cancelled = true;
@@ -195,13 +254,17 @@ public class LiveGameService(IServiceScopeFactory scopes, IHubContext<GameHub> h
                     var beforePhase = g.Phase;
                     var beforeLog = g.BidLog.Count;
                     var beforeTrick = g.CurrentTrick.Count;
+                    var tricksBefore = g.CompletedTricks.Count;
                     GameEngine.RunBots(g);
-                    if (g.Phase == GamePhase.Complete) finished = true;
+                    BeginRevealIfNeeded(table, tricksBefore);
+                    if (g.Phase == GamePhase.Complete && !IsRevealing(table)) finished = true;
                     else if (g.Phase == GamePhase.Cancelled) cancelled = true;
                     else
                         acted = g.CurrentTurn != beforeTurn || g.Phase != beforePhase
-                            || g.BidLog.Count != beforeLog || g.CurrentTrick.Count != beforeTrick;
-                    RefreshTurnDeadline(table);
+                            || g.BidLog.Count != beforeLog || g.CurrentTrick.Count != beforeTrick
+                            || IsRevealing(table);
+                    if (!IsRevealing(table))
+                        RefreshTurnDeadline(table);
                 }
             }
             if (finished)
@@ -217,7 +280,14 @@ public class LiveGameService(IServiceScopeFactory scopes, IHubContext<GameHub> h
 
     private async Task After(LiveTable table, EngineResult result)
     {
-        var finished = result.GameFinished || table.State.Phase == GamePhase.Complete;
+        var revealing = false;
+        var holdFinish = false;
+        lock (table.Gate)
+        {
+            revealing = IsRevealing(table);
+            holdFinish = table.FinishAfterReveal;
+        }
+        var finished = (result.GameFinished || table.State.Phase == GamePhase.Complete) && !revealing && !holdFinish;
         var cancelled = result.Cancelled || table.State.Phase == GamePhase.Cancelled;
         if (finished)
             await PersistFinished(table.State);
@@ -315,6 +385,27 @@ public class LiveGameService(IServiceScopeFactory scopes, IHubContext<GameHub> h
         return table;
     }
 
+    private static bool IsRevealing(LiveTable table) =>
+        table.RevealUntil is DateTime until && DateTime.UtcNow < until;
+
+    private static void BeginRevealIfNeeded(LiveTable table, int tricksBefore)
+    {
+        var g = table.State;
+        if (g.CompletedTricks.Count <= tricksBefore) return;
+        table.RevealUntil = DateTime.UtcNow.Add(LiveTable.TrickReveal);
+        table.FinishAfterReveal = g.Phase == GamePhase.Complete;
+    }
+
+    private static bool ReleaseReveal(LiveTable table)
+    {
+        if (table.RevealUntil is not DateTime until) return false;
+        if (DateTime.UtcNow < until) return false;
+        table.RevealUntil = null;
+        table.DeadlineSeat = -1;
+        RefreshTurnDeadline(table);
+        return true;
+    }
+
     private static int ActorSeat(GameState g) =>
         g.Phase == GamePhase.Selecting ? g.BidderSeat ?? g.CurrentTurn : g.CurrentTurn;
 
@@ -333,6 +424,7 @@ public class LiveGameService(IServiceScopeFactory scopes, IHubContext<GameHub> h
     {
         var g = table.State;
         if (g.Phase is GamePhase.Complete or GamePhase.Cancelled) return null;
+        if (IsRevealing(table)) return null;
         RefreshTurnDeadline(table);
         if (DateTime.UtcNow < table.TurnDeadline) return null;
 
@@ -378,24 +470,40 @@ public class LiveGameService(IServiceScopeFactory scopes, IHubContext<GameHub> h
 
     public static GameSnapshotDto Snapshot(LiveTable table, Guid viewerId)
     {
-        var iso = table.State.Phase is GamePhase.Bidding or GamePhase.Selecting or GamePhase.Playing
+        var revealing = IsRevealing(table);
+        var iso = !revealing && table.State.Phase is GamePhase.Bidding or GamePhase.Selecting or GamePhase.Playing
             ? table.TurnDeadline.ToUniversalTime().ToString("O")
             : null;
-        return Snapshot(table.State, viewerId, iso);
+        return Snapshot(table.State, viewerId, iso, revealing);
     }
 
-    public static GameSnapshotDto Snapshot(GameState g, Guid viewerId, string? turnEndsAt = null)
+    public static GameSnapshotDto Snapshot(GameState g, Guid viewerId, string? turnEndsAt = null) =>
+        Snapshot(g, viewerId, turnEndsAt, revealing: false);
+
+    private static GameSnapshotDto Snapshot(GameState g, Guid viewerId, string? turnEndsAt, bool revealing)
     {
         var you = g.Players.FirstOrDefault(p => p.UserId == viewerId);
-        var hidePoints = g.Phase is GamePhase.Playing or GamePhase.Bidding or GamePhase.Selecting;
+        var showComplete = g.Phase == GamePhase.Complete && !revealing;
+        var hidePoints = !showComplete;
         var playable = Array.Empty<CardDto>();
-        if (you is not null && g.Phase == GamePhase.Playing && g.CurrentTurn == you.Seat)
+        if (!revealing && you is not null && g.Phase == GamePhase.Playing && g.CurrentTurn == you.Seat)
             playable = CardRules.LegalCards(you.Hand, g.LeadSuit).Select(c => c.ToDto()).ToArray();
+
+        var trickPlays = revealing && g.CompletedTricks.Count > 0
+            ? g.CompletedTricks[^1].Plays
+            : g.CurrentTrick;
+        var trickNumber = revealing
+            ? Math.Min(g.CompletedTricks.Count, 13)
+            : Math.Min(g.TrickNumber, 13);
+        var phase = revealing && g.Phase == GamePhase.Complete
+            ? "playing"
+            : g.Phase.ToString().ToLowerInvariant();
+        var leadSuit = revealing && trickPlays.Count > 0 ? trickPlays[0].Card.Suit : g.LeadSuit;
 
         return new GameSnapshotDto(
             g.GameId,
             g.RoomId,
-            g.Phase.ToString().ToLowerInvariant(),
+            phase,
             g.DealerSeat,
             g.CurrentTurn,
             g.Bid,
@@ -405,11 +513,11 @@ public class LiveGameService(IServiceScopeFactory scopes, IHubContext<GameHub> h
             g.Conditions.Select(c => new PartnerConditionDto(c.Nth, c.Rank, c.Suit)).ToList(),
             g.PartnerSeats,
             g.BidLog.Select(b => new BidLogDto(b.Seat, b.Kind, b.Amount)).ToList(),
-            g.CurrentTrick.Select(t => new TrickPlayDto(t.Seat, t.Card.ToDto(), g.Seat(t.Seat).UserName)).ToList(),
-            g.LeadSuit,
-            Math.Min(g.TrickNumber, 13),
+            trickPlays.Select(t => new TrickPlayDto(t.Seat, t.Card.ToDto(), g.Seat(t.Seat).UserName)).ToList(),
+            leadSuit,
+            trickNumber,
             hidePoints ? 0 : g.TeamPoints,
-            g.Phase == GamePhase.Complete ? g.Success : null,
+            showComplete ? g.Success : null,
             g.Players.Select(p => new PublicSeatDto(
                 p.UserId,
                 p.UserName,
