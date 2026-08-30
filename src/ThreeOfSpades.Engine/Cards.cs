@@ -21,8 +21,19 @@ public static class Ranks
 
     public static readonly Dictionary<string, int> Value = new()
     {
-        ["A"] = 14, ["K"] = 13, ["Q"] = 12, ["J"] = 11, ["10"] = 10,
-        ["9"] = 9, ["8"] = 8, ["7"] = 7, ["6"] = 6, ["5"] = 5, ["4"] = 4, ["3"] = 3, ["2"] = 2
+        ["A"] = 14,
+        ["K"] = 13,
+        ["Q"] = 12,
+        ["J"] = 11,
+        ["10"] = 10,
+        ["9"] = 9,
+        ["8"] = 8,
+        ["7"] = 7,
+        ["6"] = 6,
+        ["5"] = 5,
+        ["4"] = 4,
+        ["3"] = 3,
+        ["2"] = 2
     };
 }
 
@@ -44,8 +55,8 @@ public static class CardRules
     {
         <= 5 => 1,
         6 => 2,
-        7 => 3,
-        _ => 4
+        7 => 2,
+        _ => 3
     };
 
     public static List<Card> LegalCards(IReadOnlyList<Card> hand, string? leadSuit)
