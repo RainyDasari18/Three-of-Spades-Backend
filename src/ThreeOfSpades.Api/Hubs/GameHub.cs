@@ -41,6 +41,8 @@ public class GameHub(LiveGameService games, RoomService rooms) : Hub
 
     public Task PassBid(Guid roomId) => Safe(() => games.Pass(UserId, roomId));
 
+    public Task PassAllBid(Guid roomId) => Safe(() => games.PassAll(UserId, roomId));
+
     public Task Select(Guid roomId, string trump, List<PartnerConditionDto> conditions) =>
         Safe(() => games.Select(UserId, roomId, trump, (conditions ?? []).Select(c => c.ToModel()).ToList()));
 

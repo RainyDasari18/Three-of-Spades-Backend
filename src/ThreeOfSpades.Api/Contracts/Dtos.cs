@@ -85,6 +85,7 @@ public record GameSnapshotDto(
     string? Trump,
     List<PartnerConditionDto> Conditions,
     List<int> PartnerSeats,
+    List<int> PassedOutSeats,
     List<BidLogDto> BidLog,
     List<TrickPlayDto> CurrentTrick,
     string? LeadSuit,

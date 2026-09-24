@@ -33,6 +33,7 @@ public sealed class GameState
     public int Bid { get; set; }
     public int? BidderSeat { get; set; }
     public List<BidAction> BidLog { get; set; } = [];
+    public List<int> PassedOutSeats { get; set; } = [];
     public int PassesSinceRaise { get; set; }
     public bool HasAnyBid { get; set; }
     public string? Trump { get; set; }

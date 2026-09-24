@@ -68,6 +68,9 @@ public class LiveGameService(IServiceScopeFactory scopes, IHubContext<GameHub> h
     public Task<GameSnapshotDto> Pass(Guid userId, Guid roomId) =>
         Mutate(userId, roomId, (state, seat) => GameEngine.Pass(state, seat));
 
+    public Task<GameSnapshotDto> PassAll(Guid userId, Guid roomId) =>
+        Mutate(userId, roomId, (state, seat) => GameEngine.PassAll(state, seat));
+
     public Task<GameSnapshotDto> Select(Guid userId, Guid roomId, string trump, IReadOnlyList<PartnerCondition> conditions) =>
         Mutate(userId, roomId, (state, seat) => GameEngine.SelectTrumpAndPartners(state, seat, trump, conditions));
 
@@ -506,6 +509,7 @@ public class LiveGameService(IServiceScopeFactory scopes, IHubContext<GameHub> h
             g.Trump,
             g.Conditions.Select(c => new PartnerConditionDto(c.Nth, c.Rank, c.Suit)).ToList(),
             g.PartnerSeats,
+            g.PassedOutSeats,
             g.BidLog.Select(b => new BidLogDto(b.Seat, b.Kind, b.Amount)).ToList(),
             trickPlays.Select(t => new TrickPlayDto(t.Seat, t.Card.ToDto(), g.Seat(t.Seat).UserName)).ToList(),
             leadSuit,

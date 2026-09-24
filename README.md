@@ -39,11 +39,12 @@ All room routes need `Authorization: Bearer <token>`.
 - `POST /api/rooms/{id}/start` deal + bidding  
 - `POST /api/rooms/{id}/game/bid` `{ amount }`  
 - `POST /api/rooms/{id}/game/pass`  
+- `POST /api/rooms/{id}/game/pass-all` sit out the rest of bidding this hand  
 - `POST /api/rooms/{id}/game/select` `{ trump, conditions }`  
 - `POST /api/rooms/{id}/game/play` `{ cardId }`  
 - `GET /api/rooms/{id}/game` private snapshot (your hand only)
 
-Hub methods: `JoinRoom`, `PlaceBid`, `PassBid`, `Select`, `PlayCard`, `Heartbeat`. Events: `gameUpdated`, `roomUpdated`, `notice`.
+Hub methods: `JoinRoom`, `PlaceBid`, `PassBid`, `PassAllBid`, `Select`, `PlayCard`, `Heartbeat`. Events: `gameUpdated`, `roomUpdated`, `notice`.
 
 Hands and trick-point totals stay hidden in snapshots until the hand is complete. Partners reveal when the named card is played. After a raise, the high bidder wins when everyone else passes.
 

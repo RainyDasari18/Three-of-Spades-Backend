@@ -60,6 +60,53 @@ public class BiddingTests
         Assert.Equal(100, g.Bid);
         Assert.Equal((g.DealerSeat + 1) % 6, g.BidderSeat);
     }
+
+    [Fact]
+    public void Pass_all_skips_that_seat_for_the_rest_of_bidding()
+    {
+        var g = Table();
+        var first = g.CurrentTurn;
+        Assert.True(GameEngine.PassAll(g, first).Ok);
+        Assert.Contains(first, g.PassedOutSeats);
+        Assert.True(GameEngine.Bid(g, g.CurrentTurn, 100).Ok);
+
+        while (g.Phase == GamePhase.Bidding)
+        {
+            Assert.NotEqual(first, g.CurrentTurn);
+            Assert.True(GameEngine.Pass(g, g.CurrentTurn).Ok);
+        }
+
+        Assert.Equal(GamePhase.Selecting, g.Phase);
+        Assert.DoesNotContain(g.BidLog, b => b.Seat == first && b.Kind == "bid");
+        Assert.Single(g.BidLog, b => b.Seat == first && b.Kind == "passAll");
+    }
+
+    [Fact]
+    public void Pass_all_cannot_reenter_after_a_raise()
+    {
+        var g = Table();
+        var first = g.CurrentTurn;
+        Assert.True(GameEngine.PassAll(g, first).Ok);
+        Assert.True(GameEngine.Bid(g, g.CurrentTurn, 100).Ok);
+        while (g.CurrentTurn != first && g.Phase == GamePhase.Bidding)
+            Assert.True(GameEngine.Pass(g, g.CurrentTurn).Ok);
+        Assert.NotEqual(first, g.CurrentTurn);
+        Assert.False(GameEngine.Bid(g, first, 110).Ok);
+        Assert.False(GameEngine.PassAll(g, first).Ok);
+    }
+
+    [Fact]
+    public void Pass_all_from_everyone_else_awards_the_bid()
+    {
+        var g = Table();
+        var first = g.CurrentTurn;
+        Assert.True(GameEngine.Bid(g, first, 140).Ok);
+        for (var i = 0; i < 5; i++)
+            Assert.True(GameEngine.PassAll(g, g.CurrentTurn).Ok);
+        Assert.Equal(GamePhase.Selecting, g.Phase);
+        Assert.Equal(first, g.BidderSeat);
+        Assert.Equal(140, g.Bid);
+    }
 }
 
 public class BotTests

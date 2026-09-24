@@ -74,6 +74,10 @@ public class RoomsController(RoomService rooms, LiveGameService games) : Control
     public async Task<ActionResult<GameSnapshotDto>> Pass(Guid id) =>
         Ok(await games.Pass(Me, id));
 
+    [HttpPost("{id:guid}/game/pass-all")]
+    public async Task<ActionResult<GameSnapshotDto>> PassAll(Guid id) =>
+        Ok(await games.PassAll(Me, id));
+
     [HttpPost("{id:guid}/game/select")]
     public async Task<ActionResult<GameSnapshotDto>> Select(Guid id, SelectRequest req) =>
         Ok(await games.Select(Me, id, req.Trump, (req.Conditions ?? []).Select(c => c.ToModel()).ToList()));

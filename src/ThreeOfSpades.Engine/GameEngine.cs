@@ -37,6 +37,7 @@ public static class GameEngine
     {
         if (g.Phase != GamePhase.Bidding) return EngineResult.Fail(g, "Not in bidding.");
         if (g.CurrentTurn != seat) return EngineResult.Fail(g, "Not your turn.");
+        if (g.PassedOutSeats.Contains(seat)) return EngineResult.Fail(g, "You passed all this hand.");
         if (amount is < 100 or > 500) return EngineResult.Fail(g, "Bid must be between 100 and 500.");
         if (amount <= g.Bid) return EngineResult.Fail(g, "Bid must beat the current high bid.");
 
@@ -44,21 +45,55 @@ public static class GameEngine
         g.BidderSeat = seat;
         g.HasAnyBid = true;
         g.PassesSinceRaise = 0;
-        g.CurrentTurn = (seat + 1) % g.PlayerCount;
         g.BidLog.Add(new BidAction(seat, "bid", amount));
-        return EngineResult.Success(g);
+        return ContinueBidding(g, seat);
     }
 
-    public static EngineResult Pass(GameState g, int seat)
+    public static EngineResult Pass(GameState g, int seat) => PassInternal(g, seat, all: false);
+
+    public static EngineResult PassAll(GameState g, int seat) => PassInternal(g, seat, all: true);
+
+    private static EngineResult PassInternal(GameState g, int seat, bool all)
     {
         if (g.Phase != GamePhase.Bidding) return EngineResult.Fail(g, "Not in bidding.");
         if (g.CurrentTurn != seat) return EngineResult.Fail(g, "Not your turn.");
+        if (g.PassedOutSeats.Contains(seat)) return EngineResult.Fail(g, "You passed all this hand.");
 
+        if (all) g.PassedOutSeats.Add(seat);
+        g.BidLog.Add(new BidAction(seat, all ? "passAll" : "pass", null));
+        g.PassesSinceRaise++;
+
+        var ended = TryEndBidding(g);
+        if (ended is not null) return ended;
+        return ContinueBidding(g, seat);
+    }
+
+    private static EngineResult ContinueBidding(GameState g, int fromSeat)
+    {
         var n = g.PlayerCount;
-        g.BidLog.Add(new BidAction(seat, "pass", null));
-        var passes = g.PassesSinceRaise + 1;
+        var next = (fromSeat + 1) % n;
+        for (var i = 0; i < n; i++)
+        {
+            if (!g.PassedOutSeats.Contains(next))
+            {
+                g.CurrentTurn = next;
+                return EngineResult.Success(g);
+            }
 
-        if (!g.HasAnyBid && passes >= n)
+            g.PassesSinceRaise++;
+            var ended = TryEndBidding(g);
+            if (ended is not null) return ended;
+            next = (next + 1) % n;
+        }
+
+        var forcedEnd = TryEndBidding(g);
+        return forcedEnd ?? EngineResult.Success(g);
+    }
+
+    private static EngineResult? TryEndBidding(GameState g)
+    {
+        var n = g.PlayerCount;
+        if (!g.HasAnyBid && g.PassesSinceRaise >= n)
         {
             var forced = (g.DealerSeat + 1) % n;
             g.Bid = 100;
@@ -70,17 +105,15 @@ public static class GameEngine
             return EngineResult.Success(g, $"{g.Seat(forced).UserName} is forced to 100.");
         }
 
-        if (g.HasAnyBid && passes >= n - 1)
+        if (g.HasAnyBid && g.PassesSinceRaise >= n - 1)
         {
-            var winner = g.BidderSeat ?? seat;
+            var winner = g.BidderSeat ?? g.CurrentTurn;
             g.Phase = GamePhase.Selecting;
             g.CurrentTurn = winner;
             return EngineResult.Success(g, $"{g.Seat(winner).UserName} has the bid at {g.Bid}.");
         }
 
-        g.PassesSinceRaise = passes;
-        g.CurrentTurn = (seat + 1) % n;
-        return EngineResult.Success(g);
+        return null;
     }
 
     public static EngineResult SelectTrumpAndPartners(GameState g, int seat, string trump, IReadOnlyList<PartnerCondition> conditions)
