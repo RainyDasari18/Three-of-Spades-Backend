@@ -22,6 +22,29 @@ public class DeckTests
         var hands = DeckFactory.DealHands(6, new Random(1));
         Assert.All(hands, h => Assert.Equal(13, h.Count));
     }
+
+    [Theory]
+    [InlineData(0)]
+    [InlineData(1)]
+    public void Forced_hand_keeps_listed_cards_and_replaces_a_missing_seven(int combo)
+    {
+        var pattern = FunHands.All[combo];
+        var hands = DeckFactory.DealHands(5, new Random(3), forcedSeat: 2, forcedPattern: pattern);
+        var dealt = hands.SelectMany(h => h).ToList();
+        Assert.Equal(65, dealt.Count);
+        Assert.Equal(65, dealt.Select(c => c.Id).Distinct().Count());
+        Assert.All(hands, h => Assert.Equal(13, h.Count));
+
+        var hand = hands[2];
+        foreach (var wanted in pattern.Where(p => p.Rank is not "6" and not "7").GroupBy(p => (p.Rank, p.Suit)))
+            Assert.True(hand.Count(c => c.Rank == wanted.Key.Rank && c.Suit == wanted.Key.Suit) >= wanted.Count());
+
+        Assert.DoesNotContain(hand, c => c.Rank == "7");
+        Assert.Equal(pattern.Count(p => p.Suit == "S"), hand.Count(c => c.Suit == "S"));
+        Assert.Equal(pattern.Count(p => p.Suit == "H"), hand.Count(c => c.Suit == "H"));
+        Assert.Equal(pattern.Count(p => p.Suit == "D"), hand.Count(c => c.Suit == "D"));
+        Assert.Equal(pattern.Count(p => p.Suit == "C"), hand.Count(c => c.Suit == "C"));
+    }
 }
 
 public class BiddingTests

@@ -8,6 +8,7 @@ public record SetUserNameRequest(string UserName);
 public record AuthResponse(string Token, Guid UserId, string Email, string UserName, bool NeedsUserName);
 
 public record CreateRoomRequest(string Name);
+public record NextHandRequest(string RoomCode, string Email);
 public record JoinRoomRequest(string Code);
 public record TransferRequest(Guid UserId);
 public record KickRequest(Guid UserId);

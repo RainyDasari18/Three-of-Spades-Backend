@@ -29,6 +29,26 @@ public sealed class LiveTable
 public class LiveGameService(IServiceScopeFactory scopes, IHubContext<GameHub> hub)
 {
     private readonly ConcurrentDictionary<Guid, LiveTable> _tables = new();
+    private readonly ConcurrentDictionary<Guid, Guid> _nextHands = new();
+
+    public async Task ArmNextHand(string roomCode, string email, CancellationToken ct)
+    {
+        if (string.IsNullOrWhiteSpace(roomCode) || string.IsNullOrWhiteSpace(email))
+            throw new InvalidOperationException("Room code and email are required.");
+
+        using var scope = scopes.CreateScope();
+        var db = scope.ServiceProvider.GetRequiredService<AppDbContext>();
+        var code = roomCode.Trim().ToUpperInvariant();
+        var mail = email.Trim().ToLowerInvariant();
+        var room = await db.Rooms
+            .Include(r => r.Members).ThenInclude(m => m.User)
+            .FirstOrDefaultAsync(r => r.Code == code && !r.Archived, ct)
+            ?? throw new InvalidOperationException("Room not found.");
+        var member = room.Members.FirstOrDefault(m =>
+            !m.User.IsBot && string.Equals(m.User.Email, mail, StringComparison.OrdinalIgnoreCase))
+            ?? throw new InvalidOperationException("Player not found in that room.");
+        _nextHands[room.Id] = member.UserId;
+    }
 
     public LiveTable? Get(Guid roomId) => _tables.TryGetValue(roomId, out var t) ? t : null;
 
@@ -44,7 +64,21 @@ public class LiveGameService(IServiceScopeFactory scopes, IHubContext<GameHub> h
         var ownerIndex = Math.Max(0, ordered.FindIndex(m => m.UserId == room.OwnerId));
         var dealer = (ownerIndex + room.DealerIndex) % ordered.Count;
         var seated = ordered.Select(m => (m.UserId, m.User.UserName, RoomService.IsDummy(m.User))).ToList();
-        var state = GameEngine.DealNewGame(room.Id, seated, dealer);
+        Guid? forcedUserId = null;
+        IReadOnlyList<(string Rank, string Suit)>? forcedPattern = null;
+        if (_nextHands.TryRemove(room.Id, out var presetUserId))
+        {
+            if (seated.Any(p => p.UserId == presetUserId))
+            {
+                forcedUserId = presetUserId;
+                forcedPattern = FunHands.Pick(Random.Shared);
+            }
+            else
+            {
+                _nextHands[room.Id] = presetUserId;
+            }
+        }
+        var state = GameEngine.DealNewGame(room.Id, seated, dealer, forcedUserId: forcedUserId, forcedPattern: forcedPattern);
         room.ActiveGameId = state.GameId;
         await db.SaveChangesAsync(ct);
 

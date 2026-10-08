@@ -6,13 +6,30 @@ public static class GameEngine
         Guid roomId,
         IReadOnlyList<(Guid UserId, string UserName, bool IsBot)> seated,
         int dealerSeat,
-        Random? rng = null)
+        Random? rng = null,
+        Guid? forcedUserId = null,
+        IReadOnlyList<(string Rank, string Suit)>? forcedPattern = null)
     {
         var n = seated.Count;
         if (n is < 5 or > 8)
             throw new ArgumentException("Need 5–8 players.");
 
-        var hands = DeckFactory.DealHands(n, rng);
+        int? forcedSeat = null;
+        if (forcedUserId is Guid userId && forcedPattern is { Count: 13 })
+        {
+            var index = -1;
+            for (var i = 0; i < seated.Count; i++)
+            {
+                if (seated[i].UserId == userId)
+                {
+                    index = i;
+                    break;
+                }
+            }
+            if (index >= 0) forcedSeat = index;
+        }
+
+        var hands = DeckFactory.DealHands(n, rng, forcedSeat, forcedSeat is null ? null : forcedPattern);
         var players = seated.Select((p, i) => new SeatPlayer
         {
             UserId = p.UserId,

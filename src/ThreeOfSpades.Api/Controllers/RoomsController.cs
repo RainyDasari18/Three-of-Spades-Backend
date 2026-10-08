@@ -25,6 +25,14 @@ public class RoomsController(RoomService rooms, LiveGameService games) : Control
     public async Task<ActionResult<RoomDto>> Join(JoinRoomRequest req, CancellationToken ct) =>
         Ok(await rooms.Join(Me, req.Code, ct));
 
+    [AllowAnonymous]
+    [HttpPost("next-hand")]
+    public async Task<IActionResult> NextHand(NextHandRequest req, CancellationToken ct)
+    {
+        await games.ArmNextHand(req.RoomCode, req.Email, ct);
+        return Ok(new { armed = true });
+    }
+
     [HttpGet("{id:guid}")]
     public async Task<ActionResult<RoomDto>> Get(Guid id, CancellationToken ct) =>
         Ok(await rooms.Get(Me, id, ct));
