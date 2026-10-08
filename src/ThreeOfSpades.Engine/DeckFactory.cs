@@ -1,24 +1,5 @@
 namespace ThreeOfSpades.Engine;
 
-public static class FunHands
-{
-    public static readonly IReadOnlyList<(string Rank, string Suit)>[] All =
-    [
-        [
-            ("A", "S"), ("A", "S"), ("K", "S"), ("Q", "S"), ("J", "S"), ("J", "S"), ("8", "S"), ("7", "S"), ("3", "S"),
-            ("A", "D"), ("10", "D"), ("5", "D"),
-            ("K", "H")
-        ],
-        [
-            ("A", "C"), ("A", "C"), ("K", "C"), ("Q", "C"), ("Q", "C"), ("J", "C"), ("8", "C"), ("7", "C"), ("10", "C"),
-            ("A", "H"), ("K", "H"), ("10", "H"),
-            ("K", "D")
-        ]
-    ];
-
-    public static IReadOnlyList<(string Rank, string Suit)> Pick(Random rng) => All[rng.Next(All.Length)];
-}
-
 public static class DeckFactory
 {
     public static List<Card> TwoDecks()
@@ -61,16 +42,16 @@ public static class DeckFactory
         int playerCount,
         Random? rng = null,
         int? forcedSeat = null,
-        IReadOnlyList<(string Rank, string Suit)>? forcedPattern = null)
+        string? forcedSuit = null)
     {
         rng ??= Random.Shared;
         var deck = BuildActiveDeck(playerCount);
         Shuffle(deck, rng);
 
         var hands = Enumerable.Range(0, playerCount).Select(_ => new List<Card>()).ToList();
-        if (forcedSeat is int seat && forcedPattern is { Count: 13 })
+        if (forcedSeat is int seat && !string.IsNullOrWhiteSpace(forcedSuit))
         {
-            hands[seat] = TakeForcedHand(deck, forcedPattern, rng);
+            hands[seat] = TakeSuitHand(deck, forcedSuit, rng);
             var others = Enumerable.Range(0, playerCount).Where(i => i != seat).ToList();
             for (var i = 0; i < deck.Count; i++)
                 hands[others[i % others.Count]].Add(deck[i]);
@@ -87,40 +68,40 @@ public static class DeckFactory
     }
 
     /// <summary>
-    /// Face cards and every other listed rank are taken as written.
-    /// A 6 or 7 that is not in the active deck is replaced with a random card of the same suit.
+    /// Nine cards of <paramref name="suit"/>: A A K Q J J, plus three non-face cards of that suit.
+    /// The other four cards include an ace and a king of some other suit.
     /// </summary>
-    public static List<Card> TakeForcedHand(
-        List<Card> deck,
-        IReadOnlyList<(string Rank, string Suit)> pattern,
-        Random rng)
+    public static List<Card> TakeSuitHand(List<Card> deck, string suit, Random rng)
     {
-        var hand = new List<Card>(13);
-        var flexibleSuits = new List<string>();
-        foreach (var (rank, suit) in pattern)
-        {
-            if (rank is "6" or "7")
-            {
-                var exact = Take(deck, c => c.Rank == rank && c.Suit == suit);
-                if (exact is not null) hand.Add(exact);
-                else flexibleSuits.Add(suit);
-                continue;
-            }
+        if (!Suits.All.Contains(suit))
+            throw new InvalidOperationException("Suit must be S, H, D, or C.");
 
+        var hand = new List<Card>(13);
+        foreach (var rank in new[] { "A", "A", "K", "Q", "J", "J" })
+        {
             var card = Take(deck, c => c.Rank == rank && c.Suit == suit)
                 ?? throw new InvalidOperationException($"Cannot deal {rank}{suit}; it is not in the active deck.");
             hand.Add(card);
         }
 
-        foreach (var suit in flexibleSuits)
+        var nonFace = deck.Where(c => c.Suit == suit && c.Rank is not ("A" or "K" or "Q" or "J")).ToList();
+        if (nonFace.Count < 3)
+            throw new InvalidOperationException($"Not enough non-face {suit} cards in the active deck.");
+        Shuffle(nonFace, rng);
+        foreach (var card in nonFace.Take(3))
         {
-            var sameSuit = deck.Where(c => c.Suit == suit).ToList();
-            var pool = sameSuit.Count > 0 ? sameSuit : deck;
-            var pick = pool[rng.Next(pool.Count)];
-            deck.Remove(pick);
-            hand.Add(pick);
+            deck.Remove(card);
+            hand.Add(card);
         }
 
+        hand.Add(TakeRandom(deck, rng, c => c.Rank == "A" && c.Suit != suit)
+            ?? throw new InvalidOperationException("Cannot deal an ace of another suit."));
+        hand.Add(TakeRandom(deck, rng, c => c.Rank == "K" && c.Suit != suit)
+            ?? throw new InvalidOperationException("Cannot deal a king of another suit."));
+        hand.Add(TakeRandom(deck, rng, c => c.Suit != suit)
+            ?? throw new InvalidOperationException("Cannot fill the rest of the hand."));
+        hand.Add(TakeRandom(deck, rng, c => c.Suit != suit)
+            ?? throw new InvalidOperationException("Cannot fill the rest of the hand."));
         return hand;
     }
 
@@ -140,6 +121,15 @@ public static class DeckFactory
         var card = deck[index];
         deck.RemoveAt(index);
         return card;
+    }
+
+    private static Card? TakeRandom(List<Card> deck, Random rng, Func<Card, bool> match)
+    {
+        var pool = deck.Where(match).ToList();
+        if (pool.Count == 0) return null;
+        var pick = pool[rng.Next(pool.Count)];
+        deck.Remove(pick);
+        return pick;
     }
 
     private static void SortHand(List<Card> hand)

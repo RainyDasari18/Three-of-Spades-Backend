@@ -24,26 +24,32 @@ public class DeckTests
     }
 
     [Theory]
-    [InlineData(0)]
-    [InlineData(1)]
-    public void Forced_hand_keeps_listed_cards_and_replaces_a_missing_seven(int combo)
+    [InlineData(5, "S")]
+    [InlineData(5, "H")]
+    [InlineData(5, "D")]
+    [InlineData(5, "C")]
+    [InlineData(8, "S")]
+    public void Forced_suit_hand_has_nine_of_suit_plus_an_outside_ace_and_king(int players, string suit)
     {
-        var pattern = FunHands.All[combo];
-        var hands = DeckFactory.DealHands(5, new Random(3), forcedSeat: 2, forcedPattern: pattern);
+        var hands = DeckFactory.DealHands(players, new Random(3), forcedSeat: 2, forcedSuit: suit);
         var dealt = hands.SelectMany(h => h).ToList();
-        Assert.Equal(65, dealt.Count);
-        Assert.Equal(65, dealt.Select(c => c.Id).Distinct().Count());
+        Assert.Equal(players * 13, dealt.Count);
+        Assert.Equal(dealt.Count, dealt.Select(c => c.Id).Distinct().Count());
         Assert.All(hands, h => Assert.Equal(13, h.Count));
 
         var hand = hands[2];
-        foreach (var wanted in pattern.Where(p => p.Rank is not "6" and not "7").GroupBy(p => (p.Rank, p.Suit)))
-            Assert.True(hand.Count(c => c.Rank == wanted.Key.Rank && c.Suit == wanted.Key.Suit) >= wanted.Count());
+        var inSuit = hand.Where(c => c.Suit == suit).ToList();
+        Assert.Equal(9, inSuit.Count);
+        Assert.Equal(2, inSuit.Count(c => c.Rank == "A"));
+        Assert.Equal(1, inSuit.Count(c => c.Rank == "K"));
+        Assert.Equal(1, inSuit.Count(c => c.Rank == "Q"));
+        Assert.Equal(2, inSuit.Count(c => c.Rank == "J"));
+        Assert.Equal(3, inSuit.Count(c => c.Rank is not ("A" or "K" or "Q" or "J")));
 
-        Assert.DoesNotContain(hand, c => c.Rank == "7");
-        Assert.Equal(pattern.Count(p => p.Suit == "S"), hand.Count(c => c.Suit == "S"));
-        Assert.Equal(pattern.Count(p => p.Suit == "H"), hand.Count(c => c.Suit == "H"));
-        Assert.Equal(pattern.Count(p => p.Suit == "D"), hand.Count(c => c.Suit == "D"));
-        Assert.Equal(pattern.Count(p => p.Suit == "C"), hand.Count(c => c.Suit == "C"));
+        var rest = hand.Where(c => c.Suit != suit).ToList();
+        Assert.Equal(4, rest.Count);
+        Assert.Contains(rest, c => c.Rank == "A");
+        Assert.Contains(rest, c => c.Rank == "K");
     }
 }
 

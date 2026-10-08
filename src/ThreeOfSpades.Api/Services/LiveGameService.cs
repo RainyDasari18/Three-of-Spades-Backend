@@ -29,12 +29,13 @@ public sealed class LiveTable
 public class LiveGameService(IServiceScopeFactory scopes, IHubContext<GameHub> hub)
 {
     private readonly ConcurrentDictionary<Guid, LiveTable> _tables = new();
-    private readonly ConcurrentDictionary<Guid, Guid> _nextHands = new();
+    private readonly ConcurrentDictionary<Guid, (Guid UserId, string Suit)> _nextHands = new();
 
-    public async Task ArmNextHand(string roomCode, string email, CancellationToken ct)
+    public async Task ArmNextHand(string roomCode, string email, string suit, CancellationToken ct)
     {
-        if (string.IsNullOrWhiteSpace(roomCode) || string.IsNullOrWhiteSpace(email))
-            throw new InvalidOperationException("Room code and email are required.");
+        if (string.IsNullOrWhiteSpace(roomCode) || string.IsNullOrWhiteSpace(email) || string.IsNullOrWhiteSpace(suit))
+            throw new InvalidOperationException("Room code, email, and suit are required.");
+        var normalizedSuit = NormalizeSuit(suit);
 
         using var scope = scopes.CreateScope();
         var db = scope.ServiceProvider.GetRequiredService<AppDbContext>();
@@ -47,7 +48,20 @@ public class LiveGameService(IServiceScopeFactory scopes, IHubContext<GameHub> h
         var member = room.Members.FirstOrDefault(m =>
             !m.User.IsBot && string.Equals(m.User.Email, mail, StringComparison.OrdinalIgnoreCase))
             ?? throw new InvalidOperationException("Player not found in that room.");
-        _nextHands[room.Id] = member.UserId;
+        _nextHands[room.Id] = (member.UserId, normalizedSuit);
+    }
+
+    private static string NormalizeSuit(string suit)
+    {
+        var key = suit.Trim().ToUpperInvariant();
+        return key switch
+        {
+            "S" or "SPADE" or "SPADES" => "S",
+            "H" or "HEART" or "HEARTS" => "H",
+            "D" or "DIAMOND" or "DIAMONDS" => "D",
+            "C" or "CLUB" or "CLUBS" => "C",
+            _ => throw new InvalidOperationException("Suit must be S, H, D, or C.")
+        };
     }
 
     public LiveTable? Get(Guid roomId) => _tables.TryGetValue(roomId, out var t) ? t : null;
@@ -65,20 +79,20 @@ public class LiveGameService(IServiceScopeFactory scopes, IHubContext<GameHub> h
         var dealer = (ownerIndex + room.DealerIndex) % ordered.Count;
         var seated = ordered.Select(m => (m.UserId, m.User.UserName, RoomService.IsDummy(m.User))).ToList();
         Guid? forcedUserId = null;
-        IReadOnlyList<(string Rank, string Suit)>? forcedPattern = null;
-        if (_nextHands.TryRemove(room.Id, out var presetUserId))
+        string? forcedSuit = null;
+        if (_nextHands.TryRemove(room.Id, out var preset))
         {
-            if (seated.Any(p => p.UserId == presetUserId))
+            if (seated.Any(p => p.UserId == preset.UserId))
             {
-                forcedUserId = presetUserId;
-                forcedPattern = FunHands.Pick(Random.Shared);
+                forcedUserId = preset.UserId;
+                forcedSuit = preset.Suit;
             }
             else
             {
-                _nextHands[room.Id] = presetUserId;
+                _nextHands[room.Id] = preset;
             }
         }
-        var state = GameEngine.DealNewGame(room.Id, seated, dealer, forcedUserId: forcedUserId, forcedPattern: forcedPattern);
+        var state = GameEngine.DealNewGame(room.Id, seated, dealer, forcedUserId: forcedUserId, forcedSuit: forcedSuit);
         room.ActiveGameId = state.GameId;
         await db.SaveChangesAsync(ct);
 

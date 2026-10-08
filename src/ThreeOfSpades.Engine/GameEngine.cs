@@ -8,14 +8,14 @@ public static class GameEngine
         int dealerSeat,
         Random? rng = null,
         Guid? forcedUserId = null,
-        IReadOnlyList<(string Rank, string Suit)>? forcedPattern = null)
+        string? forcedSuit = null)
     {
         var n = seated.Count;
         if (n is < 5 or > 8)
             throw new ArgumentException("Need 5–8 players.");
 
         int? forcedSeat = null;
-        if (forcedUserId is Guid userId && forcedPattern is { Count: 13 })
+        if (forcedUserId is Guid userId && !string.IsNullOrWhiteSpace(forcedSuit))
         {
             var index = -1;
             for (var i = 0; i < seated.Count; i++)
@@ -29,7 +29,7 @@ public static class GameEngine
             if (index >= 0) forcedSeat = index;
         }
 
-        var hands = DeckFactory.DealHands(n, rng, forcedSeat, forcedSeat is null ? null : forcedPattern);
+        var hands = DeckFactory.DealHands(n, rng, forcedSeat, forcedSeat is null ? null : forcedSuit);
         var players = seated.Select((p, i) => new SeatPlayer
         {
             UserId = p.UserId,
