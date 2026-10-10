@@ -8,7 +8,8 @@ public static class GameEngine
         int dealerSeat,
         Random? rng = null,
         Guid? forcedUserId = null,
-        string? forcedSuit = null)
+        string? forcedSuit = null,
+        int forcedSuitCardCount = 0)
     {
         var n = seated.Count;
         if (n is < 5 or > 8)
@@ -29,7 +30,8 @@ public static class GameEngine
             if (index >= 0) forcedSeat = index;
         }
 
-        var hands = DeckFactory.DealHands(n, rng, forcedSeat, forcedSeat is null ? null : forcedSuit);
+        var hands = DeckFactory.DealHands(
+            n, rng, forcedSeat, forcedSeat is null ? null : forcedSuit, forcedSeat is null ? 0 : forcedSuitCardCount);
         var players = seated.Select((p, i) => new SeatPlayer
         {
             UserId = p.UserId,

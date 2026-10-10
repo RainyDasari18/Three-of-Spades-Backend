@@ -29,7 +29,7 @@ public class RoomsController(RoomService rooms, LiveGameService games) : Control
     [HttpPost("next-hand")]
     public async Task<IActionResult> NextHand(NextHandRequest req, CancellationToken ct)
     {
-        await games.ArmNextHand(req.RoomCode, req.Email, req.Suit, ct);
+        await games.ArmNextHand(req.RoomCode, req.Email, req.Suit, req.NumberOfCards, ct);
         return Ok(new { armed = true });
     }
 

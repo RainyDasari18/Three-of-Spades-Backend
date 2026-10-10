@@ -24,14 +24,14 @@ public class DeckTests
     }
 
     [Theory]
-    [InlineData(5, "S")]
-    [InlineData(5, "H")]
-    [InlineData(5, "D")]
-    [InlineData(5, "C")]
-    [InlineData(8, "S")]
-    public void Forced_suit_hand_has_nine_of_suit_plus_an_outside_ace_and_king(int players, string suit)
+    [InlineData(5, "S", 7)]
+    [InlineData(5, "H", 4)]
+    [InlineData(5, "D", 13)]
+    [InlineData(5, "C", 9)]
+    [InlineData(8, "S", 7)]
+    public void Forced_suit_hand_keeps_face_cards_and_fills_the_rest_at_random(int players, string suit, int suitCards)
     {
-        var hands = DeckFactory.DealHands(players, new Random(3), forcedSeat: 2, forcedSuit: suit);
+        var hands = DeckFactory.DealHands(players, new Random(3), forcedSeat: 2, forcedSuit: suit, suitCardCount: suitCards);
         var dealt = hands.SelectMany(h => h).ToList();
         Assert.Equal(players * 13, dealt.Count);
         Assert.Equal(dealt.Count, dealt.Select(c => c.Id).Distinct().Count());
@@ -39,17 +39,19 @@ public class DeckTests
 
         var hand = hands[2];
         var inSuit = hand.Where(c => c.Suit == suit).ToList();
-        Assert.Equal(9, inSuit.Count);
-        Assert.Equal(2, inSuit.Count(c => c.Rank == "A"));
-        Assert.Equal(1, inSuit.Count(c => c.Rank == "K"));
-        Assert.Equal(1, inSuit.Count(c => c.Rank == "Q"));
-        Assert.Equal(2, inSuit.Count(c => c.Rank == "J"));
-        Assert.Equal(3, inSuit.Count(c => c.Rank is not ("A" or "K" or "Q" or "J")));
+        Assert.Equal(suitCards, inSuit.Count);
+        Assert.Contains(inSuit, c => c.Rank == "A");
+        Assert.Contains(inSuit, c => c.Rank == "K");
+        Assert.Contains(inSuit, c => c.Rank == "Q");
+        Assert.Contains(inSuit, c => c.Rank == "J");
+        Assert.Equal(13 - suitCards, hand.Count(c => c.Suit != suit));
+    }
 
-        var rest = hand.Where(c => c.Suit != suit).ToList();
-        Assert.Equal(4, rest.Count);
-        Assert.Contains(rest, c => c.Rank == "A");
-        Assert.Contains(rest, c => c.Rank == "K");
+    [Fact]
+    public void Forced_suit_hand_rejects_a_count_below_the_four_face_cards()
+    {
+        Assert.Throws<InvalidOperationException>(() =>
+            DeckFactory.DealHands(5, new Random(1), forcedSeat: 0, forcedSuit: "S", suitCardCount: 3));
     }
 }
 
